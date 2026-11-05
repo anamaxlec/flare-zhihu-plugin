@@ -1,0 +1,111 @@
+{
+  "$schema": "https://unpkg.com/flare-plugin-sdk@0.1.0-beta.10/skill/flare-plugin/manifest.schema.json",
+  "schemaVersion": 1,
+  "apiVersion": 1,
+  "id": "dev.maxlec.zhihu",
+  "version": "0.1.0",
+  "defaultLocale": "zh-Hans",
+  "name": { "key": "plugin.name", "fallback": "Zhihu" },
+  "description": { "key": "plugin.description", "fallback": "Zhihu hot list, recommendations and answers" },
+  "permissions": {
+    "mediaNetwork": true
+  },
+  "platform": {
+    "id": "zhihu",
+    "name": { "key": "platform.name", "fallback": "Zhihu" },
+    "detector": {
+      "priority": 0
+    },
+    "loginMethods": [
+      {
+        "id": "browser",
+        "interaction": "WebCookie",
+        "title": { "key": "login.browser.title", "fallback": "Sign in with browser" },
+        "cookie": {
+          "startUrl": "$accountOrigin/",
+          "probes": [
+            {
+              "url": "$accountOrigin/api/v4/me",
+              "cookies": [
+                { "name": "z_c0", "required": true },
+                { "name": "d_c0", "required": true }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "capabilities": {
+      "flare.datasource.timeline/v1": {
+        "operations": {
+          "page": {
+            "directions": ["refresh", "older"]
+          }
+        }
+      },
+      "flare.datasource.article/v1": {
+        "operations": {
+          "detail": {},
+          "comments": {}
+        }
+      },
+      "flare.datasource.profile/v1": {
+        "operations": {
+          "byId": {},
+          "byHandle": {},
+          "timeline": {},
+          "following": {},
+          "followers": {}
+        }
+      },
+      "flare.datasource.relation/v1": {
+        "operations": {
+          "state": {},
+          "mutate": {}
+        },
+        "relationActions": ["follow"]
+      }
+    },
+    "timelines": [
+      {
+        "id": "recommend",
+        "title": { "key": "timeline.recommend.title", "fallback": "Recommended" },
+        "icon": "Home",
+        "display": "List",
+        "defaultForNewAccount": true
+      },
+      {
+        "id": "hot",
+        "title": { "key": "timeline.hot.title", "fallback": "Hot list" },
+        "icon": "Featured",
+        "display": "List"
+      },
+      {
+        "id": "following",
+        "title": { "key": "timeline.following.title", "fallback": "Following" },
+        "icon": "Follow",
+        "display": "List"
+      }
+    ],
+    "profileTabs": [
+      {
+        "id": "answers",
+        "title": { "key": "profileTab.answers", "fallback": "Answers" },
+        "icon": "List",
+        "display": "List"
+      },
+      {
+        "id": "articles",
+        "title": { "key": "profileTab.articles", "fallback": "Articles" },
+        "icon": "List",
+        "display": "List"
+      },
+      {
+        "id": "pins",
+        "title": { "key": "profileTab.pins", "fallback": "Pins" },
+        "icon": "List",
+        "display": "List"
+      }
+    ]
+  }
+}

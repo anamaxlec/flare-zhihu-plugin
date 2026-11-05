@@ -1,0 +1,12 @@
+{
+  "plugin.name": "Zhihu",
+  "plugin.description": "Zhihu hot list, recommendations, following feed, answers and articles",
+  "platform.name": "Zhihu",
+  "login.browser.title": "Sign in with browser",
+  "timeline.recommend.title": "Recommended",
+  "timeline.hot.title": "Hot list",
+  "timeline.following.title": "Following",
+  "profileTab.answers": "Answers",
+  "profileTab.articles": "Articles",
+  "profileTab.pins": "Pins"
+}

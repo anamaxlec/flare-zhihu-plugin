@@ -1,0 +1,12 @@
+{
+  "plugin.name": "知乎",
+  "plugin.description": "知乎热榜、推荐、关注动态与回答/文章详情",
+  "platform.name": "知乎",
+  "login.browser.title": "在浏览器中登录",
+  "timeline.recommend.title": "推荐",
+  "timeline.hot.title": "热榜",
+  "timeline.following.title": "关注",
+  "profileTab.answers": "回答",
+  "profileTab.articles": "文章",
+  "profileTab.pins": "想法"
+}
