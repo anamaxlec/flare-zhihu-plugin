@@ -334,11 +334,20 @@ assert.equal(
   "none",
 );
 
+const loginContext = { ...context, scope: "login" };
+const loginRequest = { methodId: "browser", origin: context.origin, flowId: "flow" };
+const loginStart = await plugin.login.browser.begin(loginRequest, loginContext);
+const manifestStartUrl = manifest.platform.loginMethods[0].cookie.startUrl.replace(
+  "$accountOrigin",
+  loginContext.origin,
+);
+assert.equal(loginStart.type, "webCookie");
+assert.equal(loginStart.startUrl, "https://www.zhihu.com/signin?next=%2F");
+assert.equal(loginStart.startUrl, manifestStartUrl);
+
 const login = await plugin.login.browser.check(
   {
-    methodId: "browser",
-    origin: "https://www.zhihu.com",
-    flowId: "flow",
+    ...loginRequest,
     cookies: {
       cookies: cookies.map((cookie) => ({
         ...cookie,
@@ -346,7 +355,7 @@ const login = await plugin.login.browser.check(
       })),
     },
   },
-  { ...context, scope: "login" },
+  loginContext,
 );
 assert.equal(login.type, "success");
 assert.equal(login.value.accountId, "100");

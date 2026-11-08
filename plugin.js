@@ -36,7 +36,7 @@
     login: {
       browser: {
         async begin(_request, context) {
-          return { type: "webCookie", startUrl: context.origin + "/" };
+          return { type: "webCookie", startUrl: context.origin + "/signin?next=%2F" };
         },
         async check(request, context) {
           const probeUrl = context.origin + "/api/v4/me";

@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.maxlec.zhihu",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "defaultLocale": "zh-Hans",
   "name": { "key": "plugin.name", "fallback": "Zhihu" },
   "description": { "key": "plugin.description", "fallback": "Zhihu hot list, recommendations and answers" },
@@ -22,7 +22,7 @@
         "interaction": "WebCookie",
         "title": { "key": "login.browser.title", "fallback": "Sign in with browser" },
         "cookie": {
-          "startUrl": "$accountOrigin/",
+          "startUrl": "$accountOrigin/signin?next=%2F",
           "probes": [
             {
               "url": "$accountOrigin/api/v4/me",
