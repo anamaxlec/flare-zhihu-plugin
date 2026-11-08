@@ -12,8 +12,10 @@
   var MEMBER_INCLUDE = "id,name,url_token,avatar_url,headline,description,cover_url,gender,follower_count,following_count,answer_count,articles_count,is_following,is_followed,user_type";
   var ANSWER_DETAIL_INCLUDE = "content,excerpt,voteup_count,comment_count,question.title,question.id,author.name,author.url_token,author.avatar_url,author.headline,created_time,updated_time";
   var ARTICLE_DETAIL_INCLUDE = "content,excerpt,voteup_count,comment_count,author.name,author.url_token,author.avatar_url,author.headline,created,updated,image_url";
+  var RECOMMEND_PATH = "/api/v3/feed/topstory/recommend";
   var PAGE_SIZE = 20;
   var MAX_PAGE_SIZE = 20;
+  var PREVIEW_LENGTH = 240;
   var URL_TOKEN_CACHE = /* @__PURE__ */ new Map();
   defineFlareSocialPlugin({
     detector: {
@@ -223,23 +225,30 @@
   });
   async function loadRecommend(page, context) {
     const limit = clampLimit(page.limit);
-    const cursor = page.direction === "older" ? page.cursor : void 0;
-    if (page.direction === "older" && !cursor) {
+    const path = page.direction === "older" ? recommendPagePath(page.cursor ?? "", limit) : RECOMMEND_PATH + "?limit=" + String(limit);
+    if (!path) {
       fail("Validation", "\u63A8\u8350\u6D41\u5206\u9875\u6E38\u6807\u65E0\u6548");
     }
-    let path = "/api/v3/feed/topstory/recommend?limit=" + String(limit);
-    if (cursor) path += "&cursor=" + encodeURIComponent(cursor);
     const root = await apiGet(path, context);
     const items = mapFeedItems(asArray(root.data), context).slice(0, limit);
-    const next = text(asObject(root.paging)?.next).trim();
+    const paging = asObject(root.paging);
+    const next = text(paging?.next).trim();
+    const nextPath = recommendPagePath(next, limit);
+    const olderCursor = paging?.is_end !== true && nextPath && nextPath !== path ? next : void 0;
     return {
       items,
-      olderCursor: next || void 0,
-      endReached: !next
+      olderCursor,
+      endReached: olderCursor === void 0
     };
   }
+  function recommendPagePath(cursor, limit) {
+    const path = cursor.replace(/^(?:https?:)?\/\/www\.zhihu\.com(?=\/)/i, "");
+    if (path.startsWith(RECOMMEND_PATH + "?") && !/[\s#\\]/.test(path)) return path;
+    if (!/^[\w.~%+/=-]+$/.test(cursor) || cursor.startsWith("/")) return void 0;
+    return RECOMMEND_PATH + "?limit=" + String(limit) + "&cursor=" + encodeURIComponent(cursor);
+  }
   async function loadHot(page, context) {
-    if (page.direction === "older") return { items: [], endReached: true };
+    let index = parseOffset(page);
     const root = await apiGet(
       "/api/v3/feed/topstory/hot-lists/total?limit=50",
       context
@@ -247,11 +256,15 @@
     const limit = clampLimit(page.limit);
     const items = [];
     const data = asArray(root.data);
-    for (let index = 0; index < data.length && items.length < limit; index += 1) {
+    for (; index < data.length && items.length < limit; index += 1) {
       const item = mapHotItem(data[index], index + 1, context);
       if (item) items.push({ type: "post", post: item });
     }
-    return { items, endReached: true };
+    return {
+      items,
+      olderCursor: index < data.length ? String(index) : void 0,
+      endReached: index >= data.length
+    };
   }
   async function loadFollowing(page, context) {
     const limit = clampLimit(page.limit);
@@ -376,7 +389,7 @@
         format: "html",
         value: titleAndBody(title, excerpt)
       },
-      media: imageMedia(thumbnail, keyId + "-cover"),
+      media: imageMedia(thumbnail, keyId + "-cover") ?? imageMedia(text(target.image_url), keyId + "-cover"),
       detailType: "article",
       url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
       favouritesCount: numberOrUndefined(target.voteup_count),
@@ -386,8 +399,8 @@
   function mapPinPreview(target, context) {
     const id = text(target.id).trim();
     if (!id) return void 0;
-    const title = text(target.excerpt_title).trim() || "\u60F3\u6CD5";
     const excerpt = pinExcerpt(target);
+    const title = text(target.excerpt_title).trim() || (excerpt ? "" : "\u60F3\u6CD5");
     const url = normalizeLinkUrl(text(target.url)) || "https://www.zhihu.com/pin/" + encodeURIComponent(id);
     const keyId = "pin:" + id;
     return {
@@ -412,18 +425,21 @@
       text(target.detail) || text(target.excerpt)
     ).trim();
     const heading = rank === void 0 ? title : "#" + String(rank) + " " + title;
-    const body = [heading, hotText, excerpt].filter(Boolean).join("\n");
+    const answerCount = numberOrUndefined(target.answer_count);
+    const answerUnit = context.locale.toLowerCase().startsWith("zh") ? " \u4E2A\u56DE\u7B54" : answerCount === 1 ? " answer" : " answers";
+    const answers = answerCount === void 0 ? "" : String(answerCount) + answerUnit;
+    const metadata = [hotText, answers].filter(Boolean).join(" \xB7 ");
+    const body = [metadata, excerpt === title ? "" : excerpt].filter(Boolean).join("\n");
     return {
       key: { id: "question:" + id, host: accountHost(context) },
       createdAt: isoFromTimestamp(target.created ?? target.created_time) ?? nowIso(),
       content: {
         format: "html",
-        value: escapeText(body)
+        value: titleAndBody(heading, body)
       },
       media: imageMedia(text(target.thumbnail), "question:" + id + "-cover"),
       detailType: "link",
-      url: "https://www.zhihu.com/question/" + encodeURIComponent(id),
-      repliesCount: numberOrUndefined(target.answer_count)
+      url: "https://www.zhihu.com/question/" + encodeURIComponent(id)
     };
   }
   function mapVideoPreview(target, context) {
@@ -465,7 +481,7 @@
     const post = mapQuestionPreview(
       target,
       context,
-      detail ? "\u{1F525} " + detail : void 0,
+      detail,
       rank
     );
     if (!post) return void 0;
@@ -544,6 +560,8 @@
   function mapArticleDetail(ref, root, key, context) {
     const title = ref.kind === "answer" ? text(asObject(root.question)?.title).trim() || "\u77E5\u4E4E\u56DE\u7B54" : text(root.title).trim() || "\u77E5\u4E4E\u6587\u7AE0";
     const content = cleanHtml(text(root.content) || text(root.excerpt));
+    const coverUrl = normalizeMediaUrl(text(root.image_url));
+    const coverInBody = coverUrl !== void 0 && content.includes('<img src="' + escapeAttribute(coverUrl) + '"');
     const questionId = text(asObject(root.question)?.id).trim();
     const url = ref.kind === "answer" ? questionId ? "https://www.zhihu.com/question/" + encodeURIComponent(questionId) + "/answer/" + encodeURIComponent(ref.id) : "https://www.zhihu.com/answer/" + encodeURIComponent(ref.id) : "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(ref.id);
     const createdAt = isoFromTimestamp(
@@ -556,7 +574,7 @@
       createdAt,
       content: { format: "html", value: content },
       url,
-      coverUrl: normalizeMediaUrl(text(root.image_url)) || firstImageUrl(content)
+      coverUrl: coverInBody ? void 0 : coverUrl
     };
   }
   function mapComment(value, ref, context) {
@@ -809,11 +827,12 @@
   function titleAndBody(title, body) {
     const parts = [];
     if (title) parts.push("<b>" + escapeHtml(title) + "</b>");
-    if (body) parts.push(escapeHtml(body).replace(/\n/g, "<br/>"));
+    if (body && body !== title) {
+      const characters = Array.from(body);
+      const preview = characters.length > PREVIEW_LENGTH ? characters.slice(0, PREVIEW_LENGTH).join("").trimEnd() + "\u2026" : body;
+      parts.push(escapeHtml(preview).replace(/\n/g, "<br/>"));
+    }
     return parts.join("<br/>") || " ";
-  }
-  function escapeText(value) {
-    return escapeHtml(value).replace(/\n/g, "<br/>");
   }
   function pinExcerpt(target) {
     const parts = [];
@@ -824,7 +843,7 @@
       if (content) parts.push(content);
     }
     const textValue = parts.join(" ").trim();
-    return (textValue || stripTags(text(target.excerpt_title))).slice(0, 400);
+    return textValue || stripTags(text(target.excerpt_title)).trim();
   }
   function pinMedia(target, keyId) {
     const urls = [];
@@ -852,10 +871,6 @@
   function imageMedia(value, id) {
     const url = normalizeMediaUrl(value || "");
     return url ? [{ id, type: "image", url }] : void 0;
-  }
-  function firstImageUrl(html) {
-    const match = /<img\b[^>]*\bsrc="([^"]+)"/i.exec(html);
-    return match ? normalizeMediaUrl(decodeEntities(match[1])) : void 0;
   }
   function cleanHtml(value) {
     let html = value.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<noscript[\s\S]*?<\/noscript>/gi, "").replace(/<iframe[\s\S]*?<\/iframe>/gi, "");

@@ -14,8 +14,10 @@ const ANSWER_DETAIL_INCLUDE =
   "content,excerpt,voteup_count,comment_count,question.title,question.id,author.name,author.url_token,author.avatar_url,author.headline,created_time,updated_time";
 const ARTICLE_DETAIL_INCLUDE =
   "content,excerpt,voteup_count,comment_count,author.name,author.url_token,author.avatar_url,author.headline,created,updated,image_url";
+const RECOMMEND_PATH = "/api/v3/feed/topstory/recommend";
 const PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 20;
+const PREVIEW_LENGTH = 240;
 const URL_TOKEN_CACHE = new Map<string, string>();
 
 type JsonObject = Record<string, unknown>;
@@ -265,27 +267,39 @@ async function loadRecommend(
   context: PluginInvocationContextV1,
 ): Promise<PageV1<TimelineItemV1>> {
   const limit = clampLimit(page.limit);
-  const cursor = page.direction === "older" ? page.cursor : undefined;
-  if (page.direction === "older" && !cursor) {
+  const path =
+    page.direction === "older"
+      ? recommendPagePath(page.cursor ?? "", limit)
+      : RECOMMEND_PATH + "?limit=" + String(limit);
+  if (!path) {
     fail("Validation", "推荐流分页游标无效");
   }
-  let path = "/api/v3/feed/topstory/recommend?limit=" + String(limit);
-  if (cursor) path += "&cursor=" + encodeURIComponent(cursor);
   const root = await apiGet(path, context);
   const items = mapFeedItems(asArray(root.data), context).slice(0, limit);
-  const next = text(asObject(root.paging)?.next).trim();
+  const paging = asObject(root.paging);
+  const next = text(paging?.next).trim();
+  const nextPath = recommendPagePath(next, limit);
+  const olderCursor =
+    paging?.is_end !== true && nextPath && nextPath !== path ? next : undefined;
   return {
     items,
-    olderCursor: next || undefined,
-    endReached: !next,
+    olderCursor,
+    endReached: olderCursor === undefined,
   };
+}
+
+function recommendPagePath(cursor: string, limit: number): string | undefined {
+  const path = cursor.replace(/^(?:https?:)?\/\/www\.zhihu\.com(?=\/)/i, "");
+  if (path.startsWith(RECOMMEND_PATH + "?") && !/[\s#\\]/.test(path)) return path;
+  if (!/^[\w.~%+/=-]+$/.test(cursor) || cursor.startsWith("/")) return undefined;
+  return RECOMMEND_PATH + "?limit=" + String(limit) + "&cursor=" + encodeURIComponent(cursor);
 }
 
 async function loadHot(
   page: PageRequestV1,
   context: PluginInvocationContextV1,
 ): Promise<PageV1<TimelineItemV1>> {
-  if (page.direction === "older") return { items: [], endReached: true };
+  let index = parseOffset(page);
   const root = await apiGet(
     "/api/v3/feed/topstory/hot-lists/total?limit=50",
     context,
@@ -293,11 +307,15 @@ async function loadHot(
   const limit = clampLimit(page.limit);
   const items: TimelineItemV1[] = [];
   const data = asArray(root.data);
-  for (let index = 0; index < data.length && items.length < limit; index += 1) {
+  for (; index < data.length && items.length < limit; index += 1) {
     const item = mapHotItem(data[index], index + 1, context);
     if (item) items.push({ type: "post", post: item });
   }
-  return { items, endReached: true };
+  return {
+    items,
+    olderCursor: index < data.length ? String(index) : undefined,
+    endReached: index >= data.length,
+  };
 }
 
 async function loadFollowing(
@@ -480,7 +498,9 @@ function mapArticlePreview(
       format: "html",
       value: titleAndBody(title, excerpt),
     },
-    media: imageMedia(thumbnail, keyId + "-cover"),
+    media:
+      imageMedia(thumbnail, keyId + "-cover") ??
+      imageMedia(text(target.image_url), keyId + "-cover"),
     detailType: "article",
     url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
     favouritesCount: numberOrUndefined(target.voteup_count),
@@ -494,8 +514,8 @@ function mapPinPreview(
 ): PostV1 | undefined {
   const id = text(target.id).trim();
   if (!id) return undefined;
-  const title = text(target.excerpt_title).trim() || "想法";
   const excerpt = pinExcerpt(target);
+  const title = text(target.excerpt_title).trim() || (excerpt ? "" : "想法");
   const url = normalizeLinkUrl(text(target.url)) ||
     "https://www.zhihu.com/pin/" + encodeURIComponent(id);
   const keyId = "pin:" + id;
@@ -528,19 +548,24 @@ function mapQuestionPreview(
     text(target.detail) || text(target.excerpt),
   ).trim();
   const heading = rank === undefined ? title : "#" + String(rank) + " " + title;
-  const body = [heading, hotText, excerpt].filter(Boolean).join("\n");
+  const answerCount = numberOrUndefined(target.answer_count);
+  const answerUnit = context.locale.toLowerCase().startsWith("zh")
+    ? " 个回答"
+    : (answerCount === 1 ? " answer" : " answers");
+  const answers = answerCount === undefined ? "" : String(answerCount) + answerUnit;
+  const metadata = [hotText, answers].filter(Boolean).join(" · ");
+  const body = [metadata, excerpt === title ? "" : excerpt].filter(Boolean).join("\n");
   return {
     key: { id: "question:" + id, host: accountHost(context) },
     createdAt:
       isoFromTimestamp(target.created ?? target.created_time) ?? nowIso(),
     content: {
       format: "html",
-      value: escapeText(body),
+      value: titleAndBody(heading, body),
     },
     media: imageMedia(text(target.thumbnail), "question:" + id + "-cover"),
     detailType: "link",
     url: "https://www.zhihu.com/question/" + encodeURIComponent(id),
-    repliesCount: numberOrUndefined(target.answer_count),
   };
 }
 
@@ -594,7 +619,7 @@ function mapHotItem(
   const post = mapQuestionPreview(
     target,
     context,
-    detail ? "🔥 " + detail : undefined,
+    detail,
     rank,
   );
   if (!post) return undefined;
@@ -698,6 +723,9 @@ function mapArticleDetail(
       ? text(asObject(root.question)?.title).trim() || "知乎回答"
       : text(root.title).trim() || "知乎文章";
   const content = cleanHtml(text(root.content) || text(root.excerpt));
+  const coverUrl = normalizeMediaUrl(text(root.image_url));
+  const coverInBody = coverUrl !== undefined &&
+    content.includes('<img src="' + escapeAttribute(coverUrl) + '"');
   const questionId = text(asObject(root.question)?.id).trim();
   const url =
     ref.kind === "answer"
@@ -719,9 +747,7 @@ function mapArticleDetail(
     createdAt,
     content: { format: "html", value: content },
     url,
-    coverUrl:
-      normalizeMediaUrl(text(root.image_url)) ||
-      firstImageUrl(content),
+    coverUrl: coverInBody ? undefined : coverUrl,
   };
 }
 
@@ -1052,12 +1078,15 @@ function clampLimit(value: number): number {
 function titleAndBody(title: string, body: string): string {
   const parts: string[] = [];
   if (title) parts.push("<b>" + escapeHtml(title) + "</b>");
-  if (body) parts.push(escapeHtml(body).replace(/\n/g, "<br/>"));
+  if (body && body !== title) {
+    const characters = Array.from(body);
+    const preview =
+      characters.length > PREVIEW_LENGTH
+        ? characters.slice(0, PREVIEW_LENGTH).join("").trimEnd() + "…"
+        : body;
+    parts.push(escapeHtml(preview).replace(/\n/g, "<br/>"));
+  }
   return parts.join("<br/>") || " ";
-}
-
-function escapeText(value: string): string {
-  return escapeHtml(value).replace(/\n/g, "<br/>");
 }
 
 function pinExcerpt(target: JsonObject): string {
@@ -1069,7 +1098,7 @@ function pinExcerpt(target: JsonObject): string {
     if (content) parts.push(content);
   }
   const textValue = parts.join(" ").trim();
-  return (textValue || stripTags(text(target.excerpt_title))).slice(0, 400);
+  return textValue || stripTags(text(target.excerpt_title)).trim();
 }
 
 function pinMedia(target: JsonObject, keyId: string): MediaV1[] | undefined {
@@ -1104,11 +1133,6 @@ function imageMedia(
 ): MediaV1[] | undefined {
   const url = normalizeMediaUrl(value || "");
   return url ? [{ id, type: "image", url }] : undefined;
-}
-
-function firstImageUrl(html: string): string | undefined {
-  const match = /<img\b[^>]*\bsrc="([^"]+)"/i.exec(html);
-  return match ? normalizeMediaUrl(decodeEntities(match[1])) : undefined;
 }
 
 function cleanHtml(value: string): string {

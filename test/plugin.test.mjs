@@ -67,6 +67,9 @@ function route(request) {
           },
           children: [{ thumbnail: "https://pic1.zhimg.com/hot.jpg" }],
         },
+        ...Array.from({ length: 49 }, (_, index) => ({
+          target: { id: String(1000 + index), title: "热榜问题 " + String(index + 2) },
+        })),
       ],
     });
   }
@@ -122,6 +125,22 @@ function route(request) {
     });
   }
   if (path === "/api/v3/feed/topstory/recommend") {
+    if (search !== "?limit=20") {
+      assert.equal(search, "?limit=20&cursor=next%2B%2F%3D&session_token=feed");
+      return json({
+        data: [{
+          type: "feed",
+          target: {
+            type: "article",
+            id: "789",
+            title: "一篇文章",
+            content: "<p>" + "文".repeat(300) + "</p>",
+            image_url: "https://pic1.zhimg.com/article-cover.jpg",
+          },
+        }],
+        paging: { is_end: true },
+      });
+    }
     return json({
       data: [
         {
@@ -146,7 +165,7 @@ function route(request) {
         },
       ],
       paging: {
-        next: "https://www.zhihu.com/api/v3/feed/topstory/recommend?limit=20&cursor=next",
+        next: "https://www.zhihu.com/api/v3/feed/topstory/recommend?limit=20&cursor=next%2B%2F%3D&session_token=feed",
       },
     });
   }
@@ -385,7 +404,32 @@ assert.equal(recommend.items[0].post.key.id, "answer:123");
 assert.equal(recommend.items[0].post.detailType, "article");
 assert.equal(recommend.items[0].post.author.key.id, "u1");
 assert.equal(recommend.items[0].post.media[0].url, "https://pic1.zhimg.com/cover.jpg");
-assert.equal(recommend.olderCursor, "https://www.zhihu.com/api/v3/feed/topstory/recommend?limit=20&cursor=next");
+assert.equal(recommend.endReached, false);
+const recommendOlder = await plugin.capabilities.timeline.page(
+  {
+    timelineId: "recommend",
+    page: { direction: "older", cursor: recommend.olderCursor, limit: 20, parameters: {} },
+    parameters: {},
+  },
+  context,
+);
+assert.equal(recommendOlder.endReached, true);
+assert.equal(recommendOlder.items[0].post.key.id, "article:789");
+assert.equal(recommendOlder.items[0].post.media[0].url, "https://pic1.zhimg.com/article-cover.jpg");
+assert.ok(recommendOlder.items[0].post.content.value.endsWith("…"));
+await assert.rejects(plugin.capabilities.timeline.page(
+  {
+    timelineId: "recommend",
+    page: {
+      direction: "older",
+      cursor: "https://www.zhihu.com.example.com/api/v3/feed/topstory/recommend?cursor=next",
+      limit: 20,
+      parameters: {},
+    },
+    parameters: {},
+  },
+  context,
+), { code: "Validation" });
 
 const hot = await plugin.capabilities.timeline.page(
   {
@@ -395,11 +439,27 @@ const hot = await plugin.capabilities.timeline.page(
   },
   context,
 );
-assert.equal(hot.items.length, 1);
+assert.equal(hot.items.length, 20);
 assert.equal(hot.items[0].post.key.id, "question:999");
 assert.equal(hot.items[0].post.detailType, "link");
-assert.ok(hot.items[0].post.content.value.includes("#1"));
+assert.ok(hot.items[0].post.content.value.startsWith("<b>#1 今天的热门问题</b>"));
+assert.ok(hot.items[0].post.content.value.includes("1234 万热度 · 88 个回答"));
 assert.equal(hot.items[0].post.media[0].url, "https://pic1.zhimg.com/hot.jpg");
+const hotOlder = (cursor) => plugin.capabilities.timeline.page(
+  {
+    timelineId: "hot",
+    page: { direction: "older", cursor, limit: 20, parameters: {} },
+    parameters: {},
+  },
+  context,
+);
+const hotSecond = await hotOlder(hot.olderCursor);
+const hotThird = await hotOlder(hotSecond.olderCursor);
+assert.equal(hotSecond.items.length, 20);
+assert.ok(hotSecond.items[0].post.content.value.startsWith("<b>#21 "));
+assert.equal(hotThird.items.length, 10);
+assert.ok(hotThird.items.at(-1).post.content.value.startsWith("<b>#50 "));
+assert.equal(hotThird.endReached, true);
 
 const followingTimeline = await plugin.capabilities.timeline.page(
   {
@@ -438,7 +498,7 @@ const detail = await plugin.capabilities.article.detail(
 assert.equal(detail.title, "如何评价 Flutter？");
 assert.ok(detail.content.value.includes('<img src="https://pic1.zhimg.com/real.jpg"'));
 assert.ok(!detail.content.value.includes("<script"));
-assert.equal(detail.coverUrl, "https://pic1.zhimg.com/real.jpg");
+assert.equal(detail.coverUrl, undefined);
 assert.equal(detail.url, "https://www.zhihu.com/question/456/answer/123");
 
 const articleDetail = await plugin.capabilities.article.detail(
