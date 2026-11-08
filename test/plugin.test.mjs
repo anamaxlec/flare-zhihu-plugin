@@ -128,16 +128,26 @@ function route(request) {
     if (search !== "?limit=20") {
       assert.equal(search, "?limit=20&cursor=next%2B%2F%3D&session_token=feed");
       return json({
-        data: [{
-          type: "feed",
-          target: {
-            type: "article",
-            id: "789",
-            title: "一篇文章",
-            content: "<p>" + "文".repeat(300) + "</p>",
-            image_url: "https://pic1.zhimg.com/article-cover.jpg",
+        data: [
+          {
+            type: "feed",
+            target: {
+              type: "article",
+              id: "789",
+              title: "一篇文章",
+              content: "<p>" + "文".repeat(300) + "</p>",
+              image_url: "https://pic1.zhimg.com/article-cover.jpg",
+            },
           },
-        }],
+          ...[
+            ["这套方案适合初学者吗？", "This approach works well for long lists."],
+            ["日本語の質問", "この方法を使っています。"],
+            ["這個方法值得推薦嗎？", "簡單而且實用，適合剛開始學習的人。"],
+          ].map(([title, excerpt], index) => ({
+            type: "feed",
+            target: { type: "answer", id: String(800 + index), question: { title }, excerpt },
+          })),
+        ],
         paging: { is_end: true },
       });
     }
@@ -402,6 +412,7 @@ assert.equal(recommend.items.length, 1);
 assert.equal(recommend.items[0].type, "post");
 assert.equal(recommend.items[0].post.key.id, "answer:123");
 assert.equal(recommend.items[0].post.detailType, "article");
+assert.deepEqual(Array.from(recommend.items[0].post.sourceLanguages ?? []), ["zh-Hans"]);
 assert.equal(recommend.items[0].post.author.key.id, "u1");
 assert.equal(recommend.items[0].post.media[0].url, "https://pic1.zhimg.com/cover.jpg");
 assert.equal(recommend.endReached, false);
@@ -417,6 +428,10 @@ assert.equal(recommendOlder.endReached, true);
 assert.equal(recommendOlder.items[0].post.key.id, "article:789");
 assert.equal(recommendOlder.items[0].post.media[0].url, "https://pic1.zhimg.com/article-cover.jpg");
 assert.ok(recommendOlder.items[0].post.content.value.endsWith("…"));
+assert.deepEqual(Array.from(recommendOlder.items[0].post.sourceLanguages ?? []), ["zh-Hans"]);
+assert.equal(recommendOlder.items[1].post.sourceLanguages, undefined);
+assert.equal(recommendOlder.items[2].post.sourceLanguages, undefined);
+assert.deepEqual(Array.from(recommendOlder.items[3].post.sourceLanguages ?? []), ["zh-Hant"]);
 await assert.rejects(plugin.capabilities.timeline.page(
   {
     timelineId: "recommend",
@@ -519,6 +534,7 @@ const comments = await plugin.capabilities.article.comments(
 );
 assert.equal(comments.items.length, 1);
 assert.equal(comments.items[0].post.author.displayName, "Bob");
+assert.deepEqual(Array.from(comments.items[0].post.sourceLanguages ?? []), ["zh-Hans"]);
 assert.ok(comments.items[0].post.content.value.includes("回复 @Alice"));
 assert.equal(comments.endReached, true);
 

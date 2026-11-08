@@ -364,6 +364,7 @@
         format: "html",
         value: titleAndBody(title, excerpt)
       },
+      sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: imageMedia(thumbnail, keyId + "-cover"),
       detailType: "article",
       url: questionId ? "https://www.zhihu.com/question/" + encodeURIComponent(questionId) + "/answer/" + encodeURIComponent(id) : "https://www.zhihu.com/answer/" + encodeURIComponent(id),
@@ -389,6 +390,7 @@
         format: "html",
         value: titleAndBody(title, excerpt)
       },
+      sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: imageMedia(thumbnail, keyId + "-cover") ?? imageMedia(text(target.image_url), keyId + "-cover"),
       detailType: "article",
       url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
@@ -408,6 +410,7 @@
       author: mapAuthor(target.author, context),
       createdAt: isoFromTimestamp(target.created ?? target.created_time) ?? nowIso(),
       content: { format: "html", value: titleAndBody(title, excerpt) },
+      sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: pinMedia(target, keyId),
       detailType: "link",
       url,
@@ -437,6 +440,7 @@
         format: "html",
         value: titleAndBody(heading, body)
       },
+      sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: imageMedia(text(target.thumbnail), "question:" + id + "-cover"),
       detailType: "link",
       url: "https://www.zhihu.com/question/" + encodeURIComponent(id)
@@ -457,6 +461,7 @@
         target.created_time ?? target.created ?? target.updated
       ) ?? nowIso(),
       content: { format: "html", value: titleAndBody(title, excerpt) },
+      sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: imageMedia(
         text(target.thumbnail) || text(target.cover_url),
         "video:" + id + "-cover"
@@ -594,6 +599,7 @@
       author: mapAuthor(authorObject, context),
       createdAt: isoFromTimestamp(comment.created_time) ?? nowIso(),
       content: { format: "html", value: prefix + body || " " },
+      sourceLanguages: zhihuSourceLanguages(stripTags(body)),
       detailType: "link",
       url,
       favouritesCount: numberOrUndefined(comment.vote_count)
@@ -916,6 +922,23 @@
   }
   function stripTags(value) {
     return decodeEntities(value.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ");
+  }
+  function zhihuSourceLanguages(...parts) {
+    const prose = parts.map((part) => part.replace(/(?:https?:\/\/|www\.)\S+/gi, ""));
+    const combined = prose.join(" ");
+    if (!/\p{Script=Han}/u.test(combined)) return void 0;
+    if (/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(combined)) {
+      return void 0;
+    }
+    for (const part of prose) {
+      const hanCount = part.match(/\p{Script=Han}/gu)?.length ?? 0;
+      const foreignWords = part.replace(/\p{Script=Han}/gu, " ").match(/\p{L}+/gu)?.length ?? 0;
+      if (foreignWords >= 2 && foreignWords * 2 > hanCount) return void 0;
+    }
+    const simplified = /[与为书买亲们众会体写动发变听问国图场实对学应开当总戏战报换数时术机条样汉没测湾点现环画种简经网线号视计评语说读课车转这过还进选长门闭间队际难电风马验龙]/u;
+    const traditional = /[與為書買親們眾會體寫動發變聽問國圖場實對學應開當總戲戰報換數時術機條樣漢沒測灣點現環畫種簡經網線號視計評語說讀課車轉這過還進選長門閉間隊際難電風馬驗龍個熱頁關]/u;
+    if (!traditional.test(combined)) return ["zh-Hans"];
+    return simplified.test(combined) ? void 0 : ["zh-Hant"];
   }
   function decodeEntities(value) {
     return value.replace(/&quot;/g, '"').replace(/&#0*39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
