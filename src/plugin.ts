@@ -48,17 +48,23 @@ defineFlareSocialPlugin({
         return { type: "webCookie", startUrl: context.origin + "/signin?next=%2F" };
       },
       async check(request, context) {
-        const probeUrl = context.origin + "/api/v4/me";
+        const path = "/api/v4/me";
+        const probeUrl = context.origin + path;
         const cookies = request.cookies.cookies
           .filter((cookie) => cookie.sourceUrl === probeUrl)
           .map(({ name, value }) => ({ name, value }));
-        if (!hasCookie(cookies, "z_c0") || !hasCookie(cookies, "d_c0")) {
+        const auth: AuthState = {
+          cookies,
+          dc0: cookieValue(cookies, "d_c0"),
+          xsrf: cookieValue(cookies, "_xsrf"),
+        };
+        if (!hasCookie(cookies, "z_c0") || !auth.dc0) {
           return { type: "pending" };
         }
         const response = await hostRequest({
-          url: probeUrl + "?include=id,name,url_token,avatar_url",
+          url: probeUrl,
           cookies,
-          headers: baseHeaders(),
+          headers: signedHeaders(path, auth, false),
         });
         if (response.status === 401 || response.status === 403) {
           return { type: "pending" };
@@ -67,22 +73,20 @@ defineFlareSocialPlugin({
           fail("Remote", "知乎拒绝了登录校验请求");
         }
         const root = parseJsonObject(response.body);
-        if (!root) return { type: "pending" };
+        if (!root || asObject(root.error) || root.user_type === "guest") {
+          return { type: "pending" };
+        }
         const userId = text(root.id).trim();
-        if (!/^\d+$/.test(userId)) return { type: "pending" };
+        if (!userId) return { type: "pending" };
         const name = text(root.name).trim();
         const urlToken = text(root.url_token).trim();
-        const dc0 = cookieValue(cookies, "d_c0");
-        const xsrf = cookieValue(cookies, "_xsrf") || cookieValue(cookies, "xsrf");
         return {
           type: "success",
           value: {
             accountId: userId,
             origin: context.origin,
             credential: {
-              cookies,
-              dc0,
-              xsrf,
+              ...auth,
               userId,
               urlToken,
               userName: name,
@@ -976,15 +980,6 @@ function signedHeaders(
   if (auth.xsrf) headers["x-xsrftoken"] = auth.xsrf;
   if (post) headers["Content-Type"] = "application/json";
   return headers;
-}
-
-function baseHeaders(): Record<string, string> {
-  return {
-    Accept: "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    Referer: ZHIHU_ORIGIN + "/",
-    "User-Agent": USER_AGENT,
-  };
 }
 
 async function hostRequest(request: HttpRequestV1): Promise<HttpResponseV1> {

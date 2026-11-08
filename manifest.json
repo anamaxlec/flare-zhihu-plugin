@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.maxlec.zhihu",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "defaultLocale": "zh-Hans",
   "name": { "key": "plugin.name", "fallback": "Zhihu" },
   "description": { "key": "plugin.description", "fallback": "Zhihu hot list, recommendations and answers" },
@@ -28,7 +28,8 @@
               "url": "$accountOrigin/api/v4/me",
               "cookies": [
                 { "name": "z_c0", "required": true },
-                { "name": "d_c0", "required": true }
+                { "name": "d_c0", "required": true },
+                { "name": "_xsrf", "required": false }
               ]
             }
           ]

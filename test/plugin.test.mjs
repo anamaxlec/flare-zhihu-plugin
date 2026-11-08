@@ -8,6 +8,7 @@ const source = await readFile(pluginPath, "utf8");
 const requests = [];
 let following = false;
 
+const zhihuUserId = "0123456789abcdef0123456789abcdef";
 const cookies = [
   { name: "z_c0", value: "z-c0-value" },
   { name: "d_c0", value: "dummy" },
@@ -20,7 +21,7 @@ const context = {
   platformId: "zhihu",
   packageHash: "test",
   scope: "account",
-  accountId: "100",
+  accountId: zhihuUserId,
   locale: "zh-Hans",
   approvedOrigins: ["https://www.zhihu.com"],
   credentialAvailable: true,
@@ -41,10 +42,14 @@ function route(request) {
   const path = url.pathname;
   const search = url.search;
   if (path === "/api/v4/me") {
+    assert.equal(request.headers["x-zse-93"], "101_3_3.0");
+    assert.match(request.headers["x-zse-96"], /^2\.0_.+/);
+    assert.equal(request.headers["x-xsrftoken"], "xsrf-value");
     return json({
-      id: "100",
+      id: zhihuUserId,
       name: "Alice",
       url_token: "alice",
+      user_type: "people",
       avatar_url: "https://pic1.zhimg.com/avatar.jpg",
     });
   }
@@ -337,7 +342,8 @@ assert.equal(
 const loginContext = { ...context, scope: "login" };
 const loginRequest = { methodId: "browser", origin: context.origin, flowId: "flow" };
 const loginStart = await plugin.login.browser.begin(loginRequest, loginContext);
-const manifestStartUrl = manifest.platform.loginMethods[0].cookie.startUrl.replace(
+const cookieLogin = manifest.platform.loginMethods[0].cookie;
+const manifestStartUrl = cookieLogin.startUrl.replace(
   "$accountOrigin",
   loginContext.origin,
 );
@@ -349,16 +355,19 @@ const login = await plugin.login.browser.check(
   {
     ...loginRequest,
     cookies: {
-      cookies: cookies.map((cookie) => ({
-        ...cookie,
-        sourceUrl: "https://www.zhihu.com/api/v4/me",
-      })),
+      cookies: cookieLogin.probes.flatMap((probe) => {
+        const sourceUrl = probe.url.replace("$accountOrigin", loginContext.origin);
+        return cookies
+          .filter((cookie) => probe.cookies.some(({ name }) => name === cookie.name))
+          .map((cookie) => ({ ...cookie, sourceUrl }));
+      }),
     },
   },
   loginContext,
 );
 assert.equal(login.type, "success");
-assert.equal(login.value.accountId, "100");
+assert.equal(login.value.accountId, zhihuUserId);
+assert.equal(login.value.profile.key.id, zhihuUserId);
 assert.equal(login.value.profile.handle, "alice");
 assert.equal(login.value.capabilities["flare.datasource.timeline/v1"][0], "page");
 
