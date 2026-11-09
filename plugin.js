@@ -21,7 +21,7 @@
   var RECOMMEND_PATH = "/api/v3/feed/topstory/recommend";
   var PAGE_SIZE = 20;
   var MAX_PAGE_SIZE = 20;
-  var PREVIEW_LENGTH = 240;
+  var PREVIEW_LENGTH = 144;
   var COMPOSE_LENGTH = 1e3;
   var URL_TOKEN_CACHE = /* @__PURE__ */ new Map();
   defineFlareSocialPlugin({
@@ -500,7 +500,8 @@
       if (!id || !createdAt || !content) continue;
       const actors = Array.isArray(content.actors) ? content.actors : [content.actors];
       const actor = mapAuthor(actors[0], context);
-      const summary = actors.map((entry) => text(asObject(entry)?.name)).filter(Boolean).join("\u3001");
+      const names = actors.map((entry) => text(asObject(entry)?.name).trim()).filter(Boolean);
+      const summary = actor ? names.length > 1 ? "\u7B49 " + names.length + " \u4EBA" : "" : names.join("\u3001");
       const target = asObject(content.target);
       const comment = asObject(event?.target);
       const body = [
@@ -705,9 +706,8 @@
     const question = asObject(target.question);
     const questionId = text(question?.id).trim();
     const title = showQuestionTitle ? text(question?.title).trim() : "";
-    const excerpt = stripTags(
-      text(target.excerpt) || text(target.content)
-    ).trim();
+    const body = text(target.content);
+    const excerpt = previewText(body) || previewText(text(target.excerpt));
     const keyId = "answer:" + id;
     const voteCount = numberOrUndefined(target.voteup_count);
     return {
@@ -719,7 +719,7 @@
         value: titleAndBody(title, excerpt)
       },
       sourceLanguages: zhihuSourceLanguages(title, excerpt),
-      media: imageMedia(thumbnail, keyId + "-cover"),
+      media: imageMedia(thumbnail || text(target.thumbnail) || text(target.cover_url), keyId + "-cover") ?? previewImage(body, keyId),
       detailType: "article",
       url: questionId ? "https://www.zhihu.com/question/" + encodeURIComponent(questionId) + "/answer/" + encodeURIComponent(id) : "https://www.zhihu.com/answer/" + encodeURIComponent(id),
       favouritesCount: voteCount,
@@ -731,9 +731,8 @@
     const id = text(target.id).trim();
     if (!/^\d+$/.test(id)) return void 0;
     const title = text(target.title).trim();
-    const excerpt = stripTags(
-      text(target.excerpt) || text(target.content)
-    ).trim();
+    const body = text(target.content);
+    const excerpt = previewText(body) || previewText(text(target.excerpt));
     const keyId = "article:" + id;
     const voteCount = numberOrUndefined(target.voteup_count);
     return {
@@ -747,7 +746,7 @@
         value: titleAndBody(title, excerpt)
       },
       sourceLanguages: zhihuSourceLanguages(title, excerpt),
-      media: imageMedia(thumbnail, keyId + "-cover") ?? imageMedia(text(target.image_url), keyId + "-cover"),
+      media: imageMedia(thumbnail, keyId + "-cover") ?? imageMedia(text(target.image_url), keyId + "-cover") ?? previewImage(body, keyId),
       detailType: "article",
       url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
       favouritesCount: voteCount,
@@ -784,14 +783,14 @@
     const title = text(target.title).trim() || text(target.name).trim();
     if (!id || !title) return void 0;
     const detail = text(target.detail) || text(target.excerpt);
-    const excerpt = stripTags(detail).trim();
+    const excerpt = previewText(detail);
     const heading = rank === void 0 ? title : "#" + String(rank) + " " + title;
     const answerCount = numberOrUndefined(target.answer_count);
     const answerUnit = context.locale.toLowerCase().startsWith("zh") ? " \u4E2A\u56DE\u7B54" : answerCount === 1 ? " answer" : " answers";
     const answers = answerCount === void 0 ? "" : String(answerCount) + answerUnit;
     const metadata = [hotText, answers].filter(Boolean).join(" \xB7 ");
     const body = [metadata, excerpt === title ? "" : excerpt].filter(Boolean).join("\n");
-    const content = full ? "<p><b>" + escapeHtml(title) + "</b></p>" + (metadata ? "<p>" + escapeHtml(metadata) + "</p>" : "") + cleanHtml(detail) : titleAndBody(heading, body);
+    const content = full ? "<p><b>" + escapeHtml(title) + "</b></p>" + (metadata ? "<p>" + escapeHtml(metadata) + "</p>" : "") + cleanHtml(detail, true) : titleAndBody(heading, body);
     return {
       key: { id: "question:" + id, host: accountHost(context) },
       author: full ? mapAuthor(target.author, context) : void 0,
@@ -891,40 +890,37 @@
     }
     if (!post) return void 0;
     post.createdAt = createdAt;
-    const verb = text(entry.verb);
-    const action = momentAction(verb);
-    const actors = asArray(entry.actors);
-    const actor = asObject(actors[0]);
-    const actorName = text(actor?.name).trim();
+    const activity = momentAction(text(entry.verb), context);
+    const actor = asObject(asArray(entry.actors)[0]);
     const actorProfile = mapAuthor(actor, context);
-    const textParts = [actorName, action].filter(Boolean);
+    const sameAuthor = actorProfile && post.author && (actorProfile.key.id === post.author.key.id || actorProfile.handle === post.author.handle);
+    if (!activity || activity.byAuthor && sameAuthor) return { type: "post", post };
+    const actorName = actorProfile ? "" : text(actor?.name).trim();
     const message = {
       key: {
         id: "moment:" + targetType + ":" + targetId + ":" + createdAt,
         host: accountHost(context)
       },
       createdAt,
+      icon: activity.icon,
       actor: actorProfile,
-      text: textParts.join(" ") || "\u5173\u6CE8\u52A8\u6001",
-      target: post.detailType === "article" ? { type: "article", key: post.key } : post.url ? { type: "link", url: post.url } : void 0
+      text: [actorName, activity.text].filter(Boolean).join(" "),
+      target: post.detailType === "article" ? { type: "article", key: post.key } : post.detailType === "post" ? { type: "post", key: post.key } : post.url ? { type: "link", url: post.url } : void 0
     };
-    return {
-      type: "post",
-      post,
-      presentation: { message }
-    };
+    return { type: "post", post, presentation: { message } };
   }
-  function momentAction(verb) {
-    if (verb.includes("VOTEUP") || verb.includes("VOTE_PIN")) return "\u8D5E\u540C\u4E86";
-    if (verb.includes("ANSWER_QUESTION")) return "\u56DE\u7B54\u4E86";
-    if (verb.includes("CREATE_ARTICLE")) return "\u53D1\u8868\u4E86\u6587\u7AE0";
-    if (verb.includes("CREATE_PIN")) return "\u53D1\u5E03\u4E86\u60F3\u6CD5";
-    if (verb.includes("FOLLOW")) return "\u5173\u6CE8\u4E86";
-    return verb;
+  function momentAction(verb, context) {
+    const chinese = context.locale.toLowerCase().startsWith("zh");
+    if (/VOTEUP|VOTE_PIN|LIKE_PIN/.test(verb)) return { text: chinese ? "\u8D5E\u540C\u4E86" : "Liked", icon: "Like" };
+    if (/ANSWER_QUESTION|CREATE_ANSWER/.test(verb)) return { text: chinese ? "\u56DE\u7B54\u4E86" : "Answered", icon: "Reply", byAuthor: true };
+    if (verb.includes("CREATE_ARTICLE")) return { text: chinese ? "\u53D1\u8868\u4E86\u6587\u7AE0" : "Published an article", icon: "List", byAuthor: true };
+    if (verb.includes("CREATE_PIN")) return { text: chinese ? "\u53D1\u5E03\u4E86\u60F3\u6CD5" : "Published a pin", icon: "List", byAuthor: true };
+    if (verb.includes("FOLLOW")) return { text: chinese ? "\u5173\u6CE8\u4E86" : "Followed", icon: "Follow" };
+    return void 0;
   }
   function mapArticleDetail(ref, root, key, context) {
     const title = ref.kind === "answer" ? text(asObject(root.question)?.title).trim() || "\u77E5\u4E4E\u56DE\u7B54" : text(root.title).trim() || "\u77E5\u4E4E\u6587\u7AE0";
-    const content = cleanHtml(text(root.content) || text(root.excerpt));
+    const content = cleanHtml(text(root.content) || text(root.excerpt), true);
     const coverUrl = normalizeMediaUrl(text(root.image_url));
     const coverInBody = coverUrl !== void 0 && content.includes('<img src="' + escapeAttribute(coverUrl) + '"');
     const questionId = text(asObject(root.question)?.id).trim();
@@ -1231,22 +1227,41 @@
     const parts = [];
     if (title) parts.push("<b>" + escapeHtml(title) + "</b>");
     if (body && body !== title) {
-      const characters = Array.from(body);
-      const preview = characters.length > PREVIEW_LENGTH ? characters.slice(0, PREVIEW_LENGTH).join("").trimEnd() + "\u2026" : body;
-      parts.push(escapeHtml(preview).replace(/\n/g, "<br/>"));
+      const paragraphs = body.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+      const characters = Array.from(paragraphs.slice(0, 2).join("\n"));
+      const clipped = paragraphs.length > 2 || characters.length > PREVIEW_LENGTH;
+      const preview = characters.slice(0, PREVIEW_LENGTH).join("").trimEnd();
+      parts.push(escapeHtml(clipped ? preview.replace(/[.。…]+$/, "") + "\u2026" : preview).replace(/\n/g, "<br/>"));
     }
     return parts.join("<br/>") || " ";
+  }
+  function previewText(value) {
+    return decodeEntities(value.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "").replace(/<br\s*\/?\s*>|<\/(?:p|div|li|blockquote|h[1-6])>/gi, "\n").replace(/<[^>]*>/g, "")).split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
   }
   function pinExcerpt(target) {
     const parts = [];
     for (const value of asArray(target.content)) {
       const item = asObject(value);
-      if (!item) continue;
-      const content = stripTags(text(item.content)).trim();
+      if (item?.type !== "text") continue;
+      const content = previewText(text(item.content));
       if (content) parts.push(content);
     }
-    const textValue = parts.join(" ").trim();
-    return textValue || stripTags(text(target.content_html) || text(target.excerpt_title)).trim();
+    return parts.join("\n") || previewText(text(target.content_html) || text(target.excerpt_title));
+  }
+  function previewImage(html, key) {
+    for (const [tag] of html.matchAll(/<img\b[^>]*>/gi)) {
+      if (isInlineIcon(tag)) continue;
+      const previewUrl = normalizeMediaUrl(attribute(tag, "data-actualsrc") || attribute(tag, "src"));
+      const url = normalizeMediaUrl(attribute(tag, "data-original")) ?? previewUrl;
+      if (url) return [{
+        id: key + "-cover",
+        type: "image",
+        url,
+        previewUrl: previewUrl !== url ? previewUrl : void 0,
+        description: decodeEntities(attribute(tag, "alt")) || void 0
+      }];
+    }
+    return void 0;
   }
   function pinTitle(pin) {
     const textItem = asArray(pin.content).map(asObject).find((item) => item?.type === "text");
@@ -1305,8 +1320,7 @@
       if (!url) return "";
       const altAttribute = alt ? ' alt="' + escapeAttribute(decodeEntities(alt)) + '"' : "";
       const image = '<img src="' + escapeAttribute(url) + '"' + altAttribute + " />";
-      const inlineIcon = /(?:^|[\s_-])(?:emoji|emoticon)(?:$|[\s_-])/i.test(attribute(tag, "class"));
-      return blockImages && figureDepth === 0 && !inlineIcon ? "<figure>" + image + "</figure>" : image;
+      return blockImages && figureDepth === 0 && !isInlineIcon(tag) ? "<figure>" + image + "</figure>" : image;
     });
     html = html.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "").replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "");
     html = html.replace(/(src|href)=(["'])\/\//gi, "$1=$2https://");
@@ -1322,6 +1336,9 @@
       }
     );
     return html.trim() || " ";
+  }
+  function isInlineIcon(tag) {
+    return /(?:^|[\s_-])(?:emoji|emoticon)(?:$|[\s_-])/i.test(attribute(tag, "class"));
   }
   function attribute(tag, name) {
     const pattern = new RegExp("\\b" + name + `\\s*=\\s*(["'])([\\s\\S]*?)\\1`, "i");

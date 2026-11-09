@@ -23,7 +23,7 @@ const QUESTION_DETAIL_INCLUDE = "detail,excerpt,author,answer_count,created,crea
 const RECOMMEND_PATH = "/api/v3/feed/topstory/recommend";
 const PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 20;
-const PREVIEW_LENGTH = 240;
+const PREVIEW_LENGTH = 144;
 const COMPOSE_LENGTH = 1000;
 const URL_TOKEN_CACHE = new Map<string, string>();
 
@@ -589,7 +589,10 @@ async function loadNotifications(
     if (!id || !createdAt || !content) continue;
     const actors = Array.isArray(content.actors) ? content.actors : [content.actors];
     const actor = mapAuthor(actors[0], context);
-    const summary = actors.map((entry) => text(asObject(entry)?.name)).filter(Boolean).join("、");
+    const names = actors.map((entry) => text(asObject(entry)?.name).trim()).filter(Boolean);
+    const summary = actor
+      ? (names.length > 1 ? "等 " + names.length + " 人" : "")
+      : names.join("、");
     const target = asObject(content.target);
     const comment = asObject(event?.target);
     const body = [
@@ -866,9 +869,8 @@ function mapAnswerPreview(
   const question = asObject(target.question);
   const questionId = text(question?.id).trim();
   const title = showQuestionTitle ? text(question?.title).trim() : "";
-  const excerpt = stripTags(
-    text(target.excerpt) || text(target.content),
-  ).trim();
+  const body = text(target.content);
+  const excerpt = previewText(body) || previewText(text(target.excerpt));
   const keyId = "answer:" + id;
   const voteCount = numberOrUndefined(target.voteup_count);
   return {
@@ -883,7 +885,8 @@ function mapAnswerPreview(
       value: titleAndBody(title, excerpt),
     },
     sourceLanguages: zhihuSourceLanguages(title, excerpt),
-    media: imageMedia(thumbnail, keyId + "-cover"),
+    media: imageMedia(thumbnail || text(target.thumbnail) || text(target.cover_url), keyId + "-cover") ??
+      previewImage(body, keyId),
     detailType: "article",
     url: questionId
       ? "https://www.zhihu.com/question/" +
@@ -906,9 +909,8 @@ function mapArticlePreview(
   const id = text(target.id).trim();
   if (!/^\d+$/.test(id)) return undefined;
   const title = text(target.title).trim();
-  const excerpt = stripTags(
-    text(target.excerpt) || text(target.content),
-  ).trim();
+  const body = text(target.content);
+  const excerpt = previewText(body) || previewText(text(target.excerpt));
   const keyId = "article:" + id;
   const voteCount = numberOrUndefined(target.voteup_count);
   return {
@@ -927,7 +929,8 @@ function mapArticlePreview(
     sourceLanguages: zhihuSourceLanguages(title, excerpt),
     media:
       imageMedia(thumbnail, keyId + "-cover") ??
-      imageMedia(text(target.image_url), keyId + "-cover"),
+      imageMedia(text(target.image_url), keyId + "-cover") ??
+      previewImage(body, keyId),
     detailType: "article",
     url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
     favouritesCount: voteCount,
@@ -976,7 +979,7 @@ function mapQuestionPreview(
   const title = text(target.title).trim() || text(target.name).trim();
   if (!id || !title) return undefined;
   const detail = text(target.detail) || text(target.excerpt);
-  const excerpt = stripTags(detail).trim();
+  const excerpt = previewText(detail);
   const heading = rank === undefined ? title : "#" + String(rank) + " " + title;
   const answerCount = numberOrUndefined(target.answer_count);
   const answerUnit = context.locale.toLowerCase().startsWith("zh")
@@ -987,7 +990,7 @@ function mapQuestionPreview(
   const body = [metadata, excerpt === title ? "" : excerpt].filter(Boolean).join("\n");
   const content = full
     ? "<p><b>" + escapeHtml(title) + "</b></p>" +
-      (metadata ? "<p>" + escapeHtml(metadata) + "</p>" : "") + cleanHtml(detail)
+      (metadata ? "<p>" + escapeHtml(metadata) + "</p>" : "") + cleanHtml(detail, true)
     : titleAndBody(heading, body);
   return {
     key: { id: "question:" + id, host: accountHost(context) },
@@ -1111,42 +1114,44 @@ function mapMoment(
   if (!post) return undefined;
   post.createdAt = createdAt;
 
-  const verb = text(entry.verb);
-  const action = momentAction(verb);
-  const actors = asArray(entry.actors);
-  const actor = asObject(actors[0]);
-  const actorName = text(actor?.name).trim();
+  const activity = momentAction(text(entry.verb), context);
+  const actor = asObject(asArray(entry.actors)[0]);
   const actorProfile = mapAuthor(actor, context);
-  const textParts = [actorName, action].filter(Boolean);
+  const sameAuthor = actorProfile && post.author &&
+    (actorProfile.key.id === post.author.key.id || actorProfile.handle === post.author.handle);
+  if (!activity || (activity.byAuthor && sameAuthor)) return { type: "post", post };
+
+  const actorName = actorProfile ? "" : text(actor?.name).trim();
   const message: MessageV1 = {
     key: {
       id: "moment:" + targetType + ":" + targetId + ":" + createdAt,
       host: accountHost(context),
     },
     createdAt,
+    icon: activity.icon,
     actor: actorProfile,
-    text: textParts.join(" ") || "关注动态",
+    text: [actorName, activity.text].filter(Boolean).join(" "),
     target:
       post.detailType === "article"
         ? { type: "article", key: post.key }
-        : post.url
-          ? { type: "link", url: post.url }
-          : undefined,
+        : post.detailType === "post"
+          ? { type: "post", key: post.key }
+          : post.url
+            ? { type: "link", url: post.url }
+            : undefined,
   };
-  return {
-    type: "post",
-    post,
-    presentation: { message },
-  };
+  return { type: "post", post, presentation: { message } };
 }
 
-function momentAction(verb: string): string {
-  if (verb.includes("VOTEUP") || verb.includes("VOTE_PIN")) return "赞同了";
-  if (verb.includes("ANSWER_QUESTION")) return "回答了";
-  if (verb.includes("CREATE_ARTICLE")) return "发表了文章";
-  if (verb.includes("CREATE_PIN")) return "发布了想法";
-  if (verb.includes("FOLLOW")) return "关注了";
-  return verb;
+function momentAction(verb: string, context: PluginInvocationContextV1):
+  { text: string; icon: HostIconV1; byAuthor?: boolean } | undefined {
+  const chinese = context.locale.toLowerCase().startsWith("zh");
+  if (/VOTEUP|VOTE_PIN|LIKE_PIN/.test(verb)) return { text: chinese ? "赞同了" : "Liked", icon: "Like" };
+  if (/ANSWER_QUESTION|CREATE_ANSWER/.test(verb)) return { text: chinese ? "回答了" : "Answered", icon: "Reply", byAuthor: true };
+  if (verb.includes("CREATE_ARTICLE")) return { text: chinese ? "发表了文章" : "Published an article", icon: "List", byAuthor: true };
+  if (verb.includes("CREATE_PIN")) return { text: chinese ? "发布了想法" : "Published a pin", icon: "List", byAuthor: true };
+  if (verb.includes("FOLLOW")) return { text: chinese ? "关注了" : "Followed", icon: "Follow" };
+  return undefined;
 }
 
 function mapArticleDetail(
@@ -1159,7 +1164,7 @@ function mapArticleDetail(
     ref.kind === "answer"
       ? text(asObject(root.question)?.title).trim() || "知乎回答"
       : text(root.title).trim() || "知乎文章";
-  const content = cleanHtml(text(root.content) || text(root.excerpt));
+  const content = cleanHtml(text(root.content) || text(root.excerpt), true);
   const coverUrl = normalizeMediaUrl(text(root.image_url));
   const coverInBody = coverUrl !== undefined &&
     content.includes('<img src="' + escapeAttribute(coverUrl) + '"');
@@ -1559,26 +1564,48 @@ function titleAndBody(title: string, body: string): string {
   const parts: string[] = [];
   if (title) parts.push("<b>" + escapeHtml(title) + "</b>");
   if (body && body !== title) {
-    const characters = Array.from(body);
-    const preview =
-      characters.length > PREVIEW_LENGTH
-        ? characters.slice(0, PREVIEW_LENGTH).join("").trimEnd() + "…"
-        : body;
-    parts.push(escapeHtml(preview).replace(/\n/g, "<br/>"));
+    const paragraphs = body.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+    const characters = Array.from(paragraphs.slice(0, 2).join("\n"));
+    const clipped = paragraphs.length > 2 || characters.length > PREVIEW_LENGTH;
+    const preview = characters.slice(0, PREVIEW_LENGTH).join("").trimEnd();
+    parts.push(escapeHtml(clipped ? preview.replace(/[.。…]+$/, "") + "…" : preview).replace(/\n/g, "<br/>"));
   }
   return parts.join("<br/>") || " ";
+}
+
+function previewText(value: string): string {
+  return decodeEntities(value
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
+    .replace(/<br\s*\/?\s*>|<\/(?:p|div|li|blockquote|h[1-6])>/gi, "\n")
+    .replace(/<[^>]*>/g, ""))
+    .split(/\r?\n/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
 }
 
 function pinExcerpt(target: JsonObject): string {
   const parts: string[] = [];
   for (const value of asArray(target.content)) {
     const item = asObject(value);
-    if (!item) continue;
-    const content = stripTags(text(item.content)).trim();
+    if (item?.type !== "text") continue;
+    const content = previewText(text(item.content));
     if (content) parts.push(content);
   }
-  const textValue = parts.join(" ").trim();
-  return textValue || stripTags(text(target.content_html) || text(target.excerpt_title)).trim();
+  return parts.join("\n") || previewText(text(target.content_html) || text(target.excerpt_title));
+}
+
+function previewImage(html: string, key: string): MediaV1[] | undefined {
+  for (const [tag] of html.matchAll(/<img\b[^>]*>/gi)) {
+    if (isInlineIcon(tag)) continue;
+    const previewUrl = normalizeMediaUrl(attribute(tag, "data-actualsrc") || attribute(tag, "src"));
+    const url = normalizeMediaUrl(attribute(tag, "data-original")) ?? previewUrl;
+    if (url) return [{
+      id: key + "-cover",
+      type: "image",
+      url,
+      previewUrl: previewUrl !== url ? previewUrl : undefined,
+      description: decodeEntities(attribute(tag, "alt")) || undefined,
+    }];
+  }
+  return undefined;
 }
 
 function pinTitle(pin: JsonObject): string {
@@ -1656,8 +1683,7 @@ function cleanHtml(value: string, blockImages = false): string {
       ? ' alt="' + escapeAttribute(decodeEntities(alt)) + '"'
       : "";
     const image = '<img src="' + escapeAttribute(url) + '"' + altAttribute + " />";
-    const inlineIcon = /(?:^|[\s_-])(?:emoji|emoticon)(?:$|[\s_-])/i.test(attribute(tag, "class"));
-    return blockImages && figureDepth === 0 && !inlineIcon ? "<figure>" + image + "</figure>" : image;
+    return blockImages && figureDepth === 0 && !isInlineIcon(tag) ? "<figure>" + image + "</figure>" : image;
   });
   html = html
     .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
@@ -1675,6 +1701,10 @@ function cleanHtml(value: string, blockImages = false): string {
     },
   );
   return html.trim() || " ";
+}
+
+function isInlineIcon(tag: string): boolean {
+  return /(?:^|[\s_-])(?:emoji|emoticon)(?:$|[\s_-])/i.test(attribute(tag, "class"));
 }
 
 function attribute(tag: string, name: string): string {

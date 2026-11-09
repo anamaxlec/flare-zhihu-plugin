@@ -265,10 +265,20 @@ function route(request) {
                   name: "Erin",
                 },
                 excerpt: "关注页摘要",
+                content: '<p>第一段<img class="emoji" src="//pic1.zhimg.com/emoji.png"></p>' +
+                  '<p>第二段' + '长'.repeat(150) + '</p>' +
+                  '<img src="//pic1.zhimg.com/preview.jpg" data-original="//pic1.zhimg.com/original.jpg">',
                 voteup_count: 5,
                 comment_count: 1,
                 created_time: 1700000350,
               },
+            },
+            {
+              type: "feed",
+              verb: "CREATE_PIN",
+              created_time: 1700000401,
+              actors: [pinBody.author],
+              target: pinBody,
             },
           ],
         },
@@ -667,16 +677,23 @@ const followingTimeline = await plugin.capabilities.timeline.page(
   },
   context,
 );
-assert.equal(followingTimeline.items.length, 1);
+assert.equal(followingTimeline.items.length, 2);
 assert.equal(followingTimeline.items[0].post.key.id, "answer:321");
 assert.equal(
   followingTimeline.items[0].presentation.message.text,
-  "Dave 赞同了",
+  "赞同了",
 );
 assert.equal(
   followingTimeline.items[0].presentation.message.target.type,
   "article",
 );
+
+assert.equal(followingTimeline.items[0].presentation.message.actor.displayName, "Dave");
+assert.equal(followingTimeline.items[0].presentation.message.icon, "Like");
+assert.match(followingTimeline.items[0].post.content.value, /第一段<br\/>第二段/);
+assert.ok(followingTimeline.items[0].post.content.value.endsWith("…"));
+assert.equal(followingTimeline.items[0].post.media[0].url, "https://pic1.zhimg.com/original.jpg");
+assert.equal(followingTimeline.items[1].presentation, undefined);
 
 const signedRequest = requests.find((request) =>
   request.url.includes("/api/v3/feed/topstory/recommend"),
