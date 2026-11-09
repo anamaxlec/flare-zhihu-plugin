@@ -7,6 +7,26 @@ const pluginPath = fileURLToPath(new URL("../plugin.js", import.meta.url));
 const source = await readFile(pluginPath, "utf8");
 const requests = [];
 let following = false;
+let pinLiked = false;
+let answerVote = "neutral";
+let articleVote = 0;
+const pinId = "2050290260991534603";
+const pinUrl = "https://www.zhihu.com/pin/" + pinId;
+const pinBody = {
+  id: pinId,
+  type: "pin",
+  url: pinUrl + "?native=0",
+  author: { id: "u1", url_token: "alice", name: "Alice" },
+  content_html: '<p>想法全文第一段</p><p>想法全文最后一段</p><img src="//pic1.zhimg.com/existing.jpg">',
+  content: [
+    { type: "text", title: "想法标题", content: "<p>想法全文第一段</p>" },
+    { type: "image", url: "//pic1.zhimg.com/existing.jpg" },
+    { type: "image", url: "//pic1.zhimg.com/image.jpg", thumbnail: "//pic1.zhimg.com/small.jpg" },
+    { type: "link_card", url: "https://www.zhihu.com/question/999" },
+  ],
+  created: 1700000150,
+  comment_count: 2,
+};
 
 const zhihuUserId = "0123456789abcdef0123456789abcdef";
 const cookies = [
@@ -52,6 +72,138 @@ function route(request) {
       user_type: "people",
       avatar_url: "https://pic1.zhimg.com/avatar.jpg",
     });
+  }
+  if (path === "/api/v4/members/abc/pins") {
+    return json({
+      data: [{ ...pinBody, id: Number(pinId), like_count: 3, virtuals: { is_liked: false } }],
+      paging: { is_end: true },
+    });
+  }
+  if (path === "/api/v4/pins/" + pinId) {
+    assert.equal(search, "?include=topics");
+    return json({ ...pinBody, like_count: pinLiked ? 4 : 3, virtuals: { is_liked: pinLiked } });
+  }
+  if (path === "/api/v4/pins/" + pinId + "/voters/up") {
+    assert.ok(request.method === "POST" || request.method === "DELETE");
+    assert.equal(request.body, undefined);
+    pinLiked = request.method === "POST";
+    return json({ is_liked: pinLiked, liked_count: pinLiked ? 4 : 3 });
+  }
+  if (path === "/api/v4/comment_v5/pins/" + pinId + "/root_comment") {
+    const second = search.includes("offset=");
+    if (second) assert.equal(url.searchParams.get("offset"), "a+b/c=");
+    return json({
+      data: [{
+        id: second ? "pc2" : "pc1",
+        author: { id: "u2", url_token: "bob", name: "Bob" },
+        reply_to_author: second ? { name: "Alice" } : undefined,
+        content: "<p>想法评论</p>",
+        created_time: 1700000200,
+        like_count: 3,
+      }],
+      paging: second ? { is_end: true } : {
+        is_end: false,
+        next: "https://www.zhihu.com" + path + "?order_by=score&limit=20&offset=a%2Bb%2Fc%3D",
+      },
+    });
+  }
+  if (path === "/api/v4/questions/999") {
+    return json({
+      id: "999", title: "今天的热门问题", answer_count: 2,
+      detail: "<p>问题完整描述</p>", created: 1700000300,
+    });
+  }
+  if (path === "/api/v4/questions/999/feeds") {
+    const second = search.includes("offset=");
+    if (second) assert.equal(url.searchParams.get("offset"), "next+offset");
+    else assert.equal(url.searchParams.get("limit"), "19");
+    return json({
+      data: [{
+        type: "feed",
+        target: { type: "answer", id: second ? "124" : "123", excerpt: "回答列表摘要" },
+      }],
+      paging: second ? { is_end: true } : {
+        is_end: false,
+        next: "https://www.zhihu.com" + path + "?limit=19&order=default&offset=next%2Boffset",
+      },
+    });
+  }
+  if (path === "/api/v4/people/alice/collections") {
+    return json({ data: [{ id: "456", title: "我的收藏" }], paging: { is_end: true } });
+  }
+  if (path === "/api/v4/collections/456/items") {
+    return json({
+      data: [{ content: pinBody }, { content: { id: "789", type: "article", title: "一篇文章" } }],
+      paging: { is_end: true },
+    });
+  }
+  if (path === "/api/v4/notifications/v2/recent") {
+    assert.equal(url.searchParams.get("entry_name"), "all");
+    return json({
+      data: [1, 2].map((id) => ({
+        id: "note" + id,
+        create_time: 1700000210 + id,
+        content: {
+          verb: "回复了你的想法",
+          actors: [{ id: "u2", url_token: "bob", name: "Bob" }],
+          target: { text: "想法标题", link: pinUrl },
+        },
+        target: { type: "comment", content: "<p>通知里的评论</p>" },
+      })),
+      paging: { is_end: true },
+    });
+  }
+  if (path === "/api/v4/search/hot_search") {
+    return json({ top_search: { words: [{ query: "测试热搜" }, { query: "测试热搜" }] } });
+  }
+  if (path === "/api/v4/search_v3") {
+    assert.equal(url.searchParams.get("q"), "Flare & 知乎");
+    if (url.searchParams.get("t") === "people") {
+      return json({
+        data: [{ type: "search_result", object: { type: "people", id: "abc", url_token: "alice", name: "Alice" } }],
+        paging: { is_end: true },
+      });
+    }
+    assert.equal(url.searchParams.get("t"), "general");
+    const second = url.searchParams.get("offset") === "20";
+    return json({
+      data: [{ type: "search_result", object: second ? pinBody : {
+        type: "answer", id: "123", excerpt: "搜索回答摘要",
+      } }],
+      paging: second ? { is_end: true } : {
+        is_end: false,
+        next: "https://www.zhihu.com/api/v4/search_v3?t=general&q=Flare%20%26%20%E7%9F%A5%E4%B9%8E&offset=20",
+      },
+    });
+  }
+  if (path === "/api/v4/answers/123/voters") {
+    assert.equal(request.method, "POST");
+    answerVote = request.body.value.type;
+    assert.ok(answerVote === "up" || answerVote === "neutral");
+    return json({ voteup_count: answerVote === "up" ? 43 : 42 });
+  }
+  if (path === "/api/v4/articles/789/voters") {
+    assert.equal(request.method, "POST");
+    articleVote = request.body.value.voting;
+    assert.ok(articleVote === 1 || articleVote === 0);
+    return json({ voteup_count: articleVote === 1 ? 10 : 9 });
+  }
+  if (path === "/api/v4/content/publish") {
+    assert.equal(request.method, "POST");
+    assert.equal(request.headers["x-xsrftoken"], "xsrf-value");
+    assert.equal(request.body.value.action, "pin");
+    const data = request.body.value.data;
+    assert.equal(data.hybrid.html, "<p>新想法 &amp; 测试</p><p>第二段</p>");
+    assert.ok(data.publish.traceId.endsWith(",00000000-0000-4000-8000-000000000000"));
+    return json({
+      message: "success",
+      data: { result: JSON.stringify({ publish: { id: pinId } }) },
+    });
+  }
+  if (path === "/api/v4/comment_v5/pins/" + pinId + "/comment") {
+    assert.equal(request.method, "POST");
+    assert.equal(request.body.value.content, "<p>&lt;测试评论&gt;</p>");
+    return json({ id: "new-comment", created_time: 1700000500, content: request.body.value.content });
   }
   if (path === "/api/v3/feed/topstory/hot-lists/total") {
     return json({
@@ -121,6 +273,7 @@ function route(request) {
       image_url: "https://pic1.zhimg.com/article-cover.jpg",
       created: 1700000500,
       voteup_count: 9,
+      relationship: { voting: articleVote },
       comment_count: 2,
     });
   }
@@ -195,6 +348,7 @@ function route(request) {
         '<p>正文</p><img src="data:image/gif;base64,AAAA" data-original="//pic1.zhimg.com/real.jpg"><script>alert(1)</script>',
       created_time: 1700000000,
       voteup_count: 42,
+      reaction: { relation: { vote: answerVote } },
       comment_count: 7,
     });
   }
@@ -287,6 +441,8 @@ const sandbox = {
         cookies,
         dc0: "dummy",
         xsrf: "xsrf-value",
+        userId: zhihuUserId,
+        urlToken: "alice",
       }),
       replace: async () => true,
     },
@@ -314,6 +470,11 @@ const manifest = JSON.parse(
 const services = {
   "flare.datasource.timeline/v1": plugin.capabilities.timeline,
   "flare.datasource.article/v1": plugin.capabilities.article,
+  "flare.datasource.post/v1": plugin.capabilities.post,
+  "flare.datasource.tab-catalog/v1": plugin.capabilities.tabCatalog,
+  "flare.datasource.notification/v1": plugin.capabilities.notification,
+  "flare.datasource.search/v1": plugin.capabilities.search,
+  "flare.datasource.compose/v1": plugin.capabilities.compose,
   "flare.datasource.profile/v1": plugin.capabilities.profile,
   "flare.datasource.relation/v1": plugin.capabilities.relation,
 };
@@ -399,6 +560,12 @@ assert.equal(login.value.accountId, zhihuUserId);
 assert.equal(login.value.profile.key.id, zhihuUserId);
 assert.equal(login.value.profile.handle, "alice");
 assert.equal(login.value.capabilities["flare.datasource.timeline/v1"][0], "page");
+for (const [capability, declaration] of Object.entries(manifest.platform.capabilities)) {
+  assert.deepEqual(
+    Array.from(login.value.capabilities[capability]).sort(),
+    Object.keys(declaration.operations).sort(),
+  );
+}
 
 const recommend = await plugin.capabilities.timeline.page(
   {
@@ -456,7 +623,7 @@ const hot = await plugin.capabilities.timeline.page(
 );
 assert.equal(hot.items.length, 20);
 assert.equal(hot.items[0].post.key.id, "question:999");
-assert.equal(hot.items[0].post.detailType, "link");
+assert.equal(hot.items[0].post.detailType, "post");
 assert.ok(hot.items[0].post.content.value.startsWith("<b>#1 今天的热门问题</b>"));
 assert.ok(hot.items[0].post.content.value.includes("1234 万热度 · 88 个回答"));
 assert.equal(hot.items[0].post.media[0].url, "https://pic1.zhimg.com/hot.jpg");
@@ -586,5 +753,106 @@ const mutation = await plugin.capabilities.relation.mutate(
 );
 assert.equal(mutation.type, "updatedRelation");
 assert.equal(mutation.relation.following, true);
+
+const refresh = { direction: "refresh", limit: 20, parameters: {} };
+const older = (cursor) => ({ ...refresh, direction: "older", cursor });
+const pinTimeline = await plugin.capabilities.profile.timeline({
+  profile: { id: "abc", host: "www.zhihu.com" }, tabId: "pins", page: refresh, parameters: {},
+}, context);
+const pinPreview = pinTimeline.items[0].post;
+assert.equal(pinPreview.key.id, "pin:" + pinId);
+assert.equal(pinPreview.detailType, "article");
+assert.equal(pinPreview.media[1].previewUrl, "https://pic1.zhimg.com/small.jpg");
+assert.equal(pinPreview.url, pinUrl);
+const pinDetail = await plugin.capabilities.article.detail({ key: pinPreview.key }, context);
+assert.equal(pinDetail.title, "想法标题");
+assert.ok(pinDetail.content.value.includes("想法全文最后一段"));
+assert.equal(pinDetail.content.value.split("existing.jpg").length, 2);
+assert.ok(pinDetail.content.value.includes('src="https://pic1.zhimg.com/image.jpg"'));
+assert.ok(pinDetail.content.value.includes('href="https://www.zhihu.com/question/999"'));
+const pinComments = await plugin.capabilities.article.comments({ key: pinPreview.key, page: refresh }, context);
+assert.equal(pinComments.items[0].post.author.displayName, "Bob");
+assert.equal(pinComments.items[0].post.url, pinUrl);
+assert.equal(pinComments.items[0].post.favouritesCount, 3);
+const morePinComments = await plugin.capabilities.article.comments({
+  key: pinPreview.key, page: older(pinComments.olderCursor),
+}, context);
+assert.equal(morePinComments.endReached, true);
+assert.ok(morePinComments.items[0].post.content.value.includes("回复 @Alice"));
+
+const questionKey = hot.items[0].post.key;
+const question = await plugin.capabilities.post.detail({ key: questionKey }, context);
+assert.ok(question.post.content.value.includes("问题完整描述"));
+const questionPage = await plugin.capabilities.post.context({ key: questionKey, page: refresh }, context);
+assert.equal(questionPage.items[0].post.key.id, questionKey.id);
+assert.equal(questionPage.items[1].post.detailType, "article");
+assert.equal(questionPage.items[1].post.url, "https://www.zhihu.com/question/999/answer/123");
+assert.equal(questionPage.items[1].post.content.value, "回答列表摘要");
+const moreQuestion = await plugin.capabilities.post.context({
+  key: questionKey, page: older(questionPage.olderCursor),
+}, context);
+assert.equal(moreQuestion.items.length, 1);
+assert.equal(moreQuestion.items[0].post.key.id, "answer:124");
+
+const collectionTabs = await plugin.capabilities.tabCatalog.page(refresh, context);
+const folder = collectionTabs.items[0].timelines.items[0];
+assert.equal(folder.id, "collection-456");
+assert.equal(folder.title.value, "我的收藏");
+const collection = await plugin.capabilities.timeline.page({
+  timelineId: folder.id, page: refresh, parameters: {},
+}, context);
+assert.equal(collection.items[0].post.key.id, "pin:" + pinId);
+assert.equal(collection.items[1].post.key.id, "article:789");
+
+const notifications = await plugin.capabilities.notification.page({ filterId: "all", page: refresh }, context);
+const [firstNotice, secondNotice] = notifications.items;
+assert.equal(firstNotice.message.target.type, "article");
+assert.equal(firstNotice.message.target.key.id, "pin:" + pinId);
+assert.ok(firstNotice.message.text.includes("通知里的评论"));
+assert.notEqual(firstNotice.message.key.id, secondNotice.message.key.id);
+
+const query = "Flare & 知乎";
+const searchPosts = await plugin.capabilities.search.posts({ query, page: refresh }, context);
+assert.equal(searchPosts.items[0].post.key.id, "answer:123");
+const moreSearch = await plugin.capabilities.search.posts({
+  query, page: older(searchPosts.olderCursor),
+}, context);
+assert.equal(moreSearch.items[0].post.key.id, "pin:" + pinId);
+const searchProfiles = await plugin.capabilities.search.profiles({ query, page: refresh }, context);
+assert.equal(searchProfiles.items[0].handle, "alice");
+const trending = await plugin.capabilities.search.discoverHashtags({ query: "", page: refresh }, context);
+assert.equal(trending.items.length, 1);
+assert.equal(trending.items[0].name, "测试热搜");
+const discoveryAuthors = await plugin.capabilities.search.discoverProfiles({ query: "", page: refresh }, context);
+assert.equal(discoveryAuthors.items[0].handle, "alice");
+const discoveryPosts = await plugin.capabilities.search.discoverPosts({ query: "", page: refresh }, context);
+assert.equal(discoveryPosts.items[0].post.key.id, questionKey.id);
+
+for (const [key, count] of [[pinPreview.key, 4], [recommend.items[0].post.key, 43], [articleDetail.key, 10]]) {
+  const mutate = (action) => plugin.capabilities.post.mutate({ key, action, parameters: {} }, context);
+  const liked = await mutate("Favourite");
+  assert.equal(liked.post.key.id, key.id);
+  assert.equal(liked.post.actions[0].action, "Unfavourite");
+  assert.equal(liked.post.actions[0].count, count);
+  assert.equal(liked.post.actions[1].action, "Reply");
+  const undone = await mutate("Unfavourite");
+  assert.equal(undone.post.actions[0].action, "Favourite");
+  assert.equal(undone.post.actions[0].count, count - 1);
+}
+
+const compose = { visibility: "public", languages: [], assets: [], sensitive: false };
+const published = await plugin.capabilities.compose.publish({
+  ...compose, text: "新想法 & 测试\n第二段",
+}, context);
+assert.equal(published.post.key.id, "pin:" + pinId);
+assert.equal(published.post.detailType, "article");
+const publishedComment = await plugin.capabilities.compose.publish({
+  ...compose, text: "<测试评论>", replyTo: pinPreview.key,
+}, context);
+assert.equal(publishedComment.post.key.id, "comment:new-comment");
+assert.equal(publishedComment.post.replyTo.id, pinPreview.key.id);
+await assert.rejects(plugin.capabilities.compose.publish({
+  ...compose, text: "不支持附件", assets: [{ handle: "asset" }],
+}, context), { code: "Unsupported" });
 
 console.log("zhihu plugin tests passed");

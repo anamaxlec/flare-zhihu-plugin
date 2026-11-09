@@ -1,5 +1,10 @@
 const TIMELINE_CAPABILITY = "flare.datasource.timeline/v1";
 const ARTICLE_CAPABILITY = "flare.datasource.article/v1";
+const POST_CAPABILITY = "flare.datasource.post/v1";
+const TAB_CATALOG_CAPABILITY = "flare.datasource.tab-catalog/v1";
+const NOTIFICATION_CAPABILITY = "flare.datasource.notification/v1";
+const SEARCH_CAPABILITY = "flare.datasource.search/v1";
+const COMPOSE_CAPABILITY = "flare.datasource.compose/v1";
 const PROFILE_CAPABILITY = "flare.datasource.profile/v1";
 const RELATION_CAPABILITY = "flare.datasource.relation/v1";
 
@@ -14,15 +19,17 @@ const ANSWER_DETAIL_INCLUDE =
   "content,excerpt,voteup_count,comment_count,question.title,question.id,author.name,author.url_token,author.avatar_url,author.headline,created_time,updated_time";
 const ARTICLE_DETAIL_INCLUDE =
   "content,excerpt,voteup_count,comment_count,author.name,author.url_token,author.avatar_url,author.headline,created,updated,image_url";
+const QUESTION_DETAIL_INCLUDE = "detail,excerpt,author,answer_count,created,created_time";
 const RECOMMEND_PATH = "/api/v3/feed/topstory/recommend";
 const PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 20;
 const PREVIEW_LENGTH = 240;
+const COMPOSE_LENGTH = 1000;
 const URL_TOKEN_CACHE = new Map<string, string>();
 
 type JsonObject = Record<string, unknown>;
 type ZhihuCookie = { name: string; value: string };
-type ArticleKind = "answer" | "article";
+type ArticleKind = "answer" | "article" | "pin";
 type ArticleRef = { kind: ArticleKind; id: string };
 type AuthState = { cookies: ZhihuCookie[]; dc0: string; xsrf: string };
 
@@ -104,6 +111,11 @@ defineFlareSocialPlugin({
             capabilities: {
               [TIMELINE_CAPABILITY]: ["page"],
               [ARTICLE_CAPABILITY]: ["detail", "comments"],
+              [POST_CAPABILITY]: ["detail", "context", "mutate"],
+              [TAB_CATALOG_CAPABILITY]: ["page"],
+              [NOTIFICATION_CAPABILITY]: ["page"],
+              [SEARCH_CAPABILITY]: ["posts", "profiles", "discoverPosts", "discoverProfiles", "discoverHashtags"],
+              [COMPOSE_CAPABILITY]: ["publish"],
               [PROFILE_CAPABILITY]: [
                 "byId",
                 "byHandle",
@@ -133,19 +145,81 @@ defineFlareSocialPlugin({
         if (request.timelineId === "following") {
           return loadFollowing(request.page, context);
         }
+        const collection = /^collection-(\d+)$/.exec(request.timelineId);
+        if (collection) return loadCollection(collection[1], request.page, context);
         fail("Unsupported", "未知的知乎时间线：" + request.timelineId);
+      },
+    },
+    tabCatalog: {
+      page: loadCollectionTabs,
+    },
+    notification: {
+      async page(request, context) {
+        return loadNotifications(request.page, context);
+      },
+    },
+    search: {
+      async posts(request, context) {
+        return loadSearch(request, "general", context, (result) => {
+          const post = mapFeedTarget(result, context);
+          return post ? { type: "post", post } : undefined;
+        });
+      },
+      async profiles(request, context) {
+        return loadSearch(request, "people", context, (result) =>
+          result.type === "people" ? mapAuthor(result, context) : undefined);
+      },
+      async discoverPosts(request, context) {
+        return loadHot(request.page, context);
+      },
+      async discoverProfiles(request, context) {
+        const recommendations = await loadRecommend(request.page, context);
+        const profiles = new Map<string, ProfileV1>();
+        for (const item of recommendations.items ?? []) {
+          if (item.type !== "post" || !item.post.author) continue;
+          const author = item.post.author;
+          profiles.set(author.key.id, author);
+        }
+        return { ...recommendations, items: [...profiles.values()] };
+      },
+      async discoverHashtags(request, context) {
+        const root = await apiGet("/api/v4/search/hot_search", context);
+        const limit = clampLimit(request.page.limit);
+        const words = new Set<string>();
+        for (const value of asArray(asObject(root.top_search)?.words)) {
+          const query = text(asObject(value)?.query).trim();
+          if (query && query.length <= 1_024) words.add(query);
+          if (words.size === limit) break;
+        }
+        return { items: [...words].map((name) => ({ name })), endReached: true };
+      },
+    },
+    compose: {
+      publish: publishContent,
+    },
+    post: {
+      async detail(request, context) {
+        const ref = parseArticleKey(request.key.id);
+        if (ref) return { post: await loadContentPost(ref, context) };
+        return { post: await loadQuestionPost(questionIdFromKey(request.key.id), context) };
+      },
+      async context(request, context) {
+        return loadQuestionAnswers(questionIdFromKey(request.key.id), request.page, context);
+      },
+      async mutate(request, context) {
+        const ref = parseArticleKey(request.key.id);
+        if (!ref || (request.action !== "Favourite" && request.action !== "Unfavourite")) {
+          fail("Unsupported", "这条知乎内容不支持此操作");
+        }
+        return mutateVote(ref, request.action === "Favourite", context);
       },
     },
     article: {
       async detail(request, context) {
         const ref = parseArticleKey(request.key.id);
         if (!ref) fail("NotFound", "无法识别这条知乎内容");
-        const path =
-          ref.kind === "answer"
-            ? "/api/v4/answers/" + encodeURIComponent(ref.id) + "?include=" + ANSWER_DETAIL_INCLUDE
-            : "/api/v4/articles/" + encodeURIComponent(ref.id) + "?include=" + ARTICLE_DETAIL_INCLUDE;
-        const root = await apiGet(path, context, true);
-        if (!root) fail("NotFound", "这条知乎内容不存在或已被删除");
+        const root = await loadContent(ref, context);
+        if (ref.kind === "pin") return mapPinDetail(root, request.key, ref.id, context);
         return mapArticleDetail(ref, root, request.key, context);
       },
       async comments(request, context) {
@@ -154,6 +228,7 @@ defineFlareSocialPlugin({
         if (request.page.direction === "newer") {
           fail("Unsupported", "知乎评论不支持更新方向的分页");
         }
+        if (ref.kind === "pin") return loadPinComments(ref, request.page, context);
         const offset = parseOffset(request.page);
         const limit = clampLimit(request.page.limit);
         const plural = ref.kind === "answer" ? "answers" : "articles";
@@ -261,6 +336,352 @@ defineFlareSocialPlugin({
     },
   },
 });
+
+function contentEndpoint(ref: ArticleRef): string {
+  return "/api/v4/" + ref.kind + "s/" + ref.id;
+}
+
+async function loadContent(ref: ArticleRef, context: PluginInvocationContextV1): Promise<JsonObject> {
+  const include = ref.kind === "pin" ? "topics" :
+    (ref.kind === "answer" ? ANSWER_DETAIL_INCLUDE : ARTICLE_DETAIL_INCLUDE) + ",reaction,relationship.voting";
+  const root = await apiGet(contentEndpoint(ref) + "?include=" + include, context, true);
+  if (!root || root.is_deleted === true) fail("NotFound", "这条知乎内容不存在或已被删除");
+  return root;
+}
+
+async function loadContentPost(ref: ArticleRef, context: PluginInvocationContextV1): Promise<PostV1> {
+  const root = { ...await loadContent(ref, context), id: ref.id };
+  const post = ref.kind === "pin" ? mapPinPreview(root, context) :
+    ref.kind === "answer" ? mapAnswerPreview(root, undefined, context) :
+    mapArticlePreview(root, undefined, context);
+  if (!post) fail("InvalidResponse", "知乎内容资料不完整");
+  return post;
+}
+
+async function mutateVote(
+  ref: ArticleRef,
+  active: boolean,
+  context: PluginInvocationContextV1,
+): Promise<PostMutationResultV1> {
+  const post = await loadContentPost(ref, context);
+  if (post.actions?.[0]?.active === active) return { type: "updatedPost", post };
+  const endpoint = contentEndpoint(ref) + "/voters";
+  const response = ref.kind === "pin"
+    ? await apiRequest(active ? "POST" : "DELETE", endpoint + "/up", undefined, context, false)
+    : await apiPost(endpoint, ref.kind === "answer"
+      ? { type: active ? "up" : "neutral" }
+      : { voting: active ? 1 : 0 }, context);
+  const count = numberOrUndefined(response?.liked_count ?? response?.voteup_count) ?? post.favouritesCount;
+  const confirmed = typeof response?.is_liked === "boolean" ? response.is_liked : active;
+  const actions = voteActions(confirmed, count) ?? [];
+  const reply = post.actions?.find(({ action }) => action === "Reply");
+  if (reply) actions.push(reply);
+  return {
+    type: "updatedPost",
+    post: { ...post, favouritesCount: count, actions },
+  };
+}
+
+function voteActions(active: boolean | undefined, count: number | undefined): ActionDescriptorV1[] | undefined {
+  if (active === undefined && count === undefined) return undefined;
+  return [{ action: active ? "Unfavourite" : "Favourite", active, count }];
+}
+
+function contentActions(target: JsonObject, active: boolean | undefined, count: number | undefined): ActionDescriptorV1[] {
+  const actions = voteActions(active, count) ?? [];
+  if (target.can_comment !== false && target.admin_closed_comment !== true &&
+      target.comment_permission !== "none" && target.comment_permission !== "closed") {
+    actions.push({ action: "Reply" });
+  }
+  return actions;
+}
+
+async function publishContent(
+  request: ComposeRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<ComposeResultV1> {
+  const body = request.text.trim();
+  if (!body || body.length > COMPOSE_LENGTH) {
+    fail("Validation", "知乎内容需要 1 至 " + COMPOSE_LENGTH + " 个字符");
+  }
+  if (request.assets.length || request.poll || request.sensitive || request.spoilerText ||
+      request.visibility !== "public" || request.languages.length) {
+    fail("Unsupported", "知乎插件目前支持公开发布纯文字");
+  }
+  const html = body.split(/\r?\n/).map((line) => "<p>" + escapeHtml(line) + "</p>").join("");
+  if (request.replyTo) {
+    const ref = parseArticleKey(request.replyTo.id);
+    if (!ref || request.replyTo.host !== accountHost(context)) {
+      fail("Unsupported", "只支持评论知乎回答、文章和想法");
+    }
+    const endpoint = "/api/v4/comment_v5/" + ref.kind + "s/" + ref.id + "/comment";
+    const response = await apiPost(endpoint, { content: html }, context);
+    const post = mapComment(response, ref, context);
+    if (!post) fail("InvalidResponse", "知乎没有返回已发送的评论");
+    return { post: { ...post, replyTo: request.replyTo } };
+  }
+
+  const auth = await readAuth();
+  if (!auth.xsrf) fail("AuthenticationRequired", "发布想法需要重新登录知乎");
+  const response = await apiPost("/api/v4/content/publish", {
+    action: "pin",
+    data: {
+      publish: { traceId: String(Date.now()) + "," + await flare.crypto.uuid() },
+      commentsPermission: { comment_permission: "all" },
+      extra_info: { view_permission: "all", publisher: "pc" },
+      draft: { disabled: 1 },
+      hybrid: { html, textLength: body.replace(/\s+/g, " ").length },
+    },
+  }, context);
+  if (response.message !== "success") {
+    fail("Remote", text(response.toast_message) || "知乎未确认发布想法");
+  }
+  const rawResult = asObject(response.data)?.result;
+  const result = asObject(rawResult) ?? parseJsonObject(text(rawResult));
+  const id = numericId(asObject(result?.publish)?.id ?? result?.id);
+  if (!id) fail("InvalidResponse", "知乎已确认发布，但未返回有效的想法 ID，请先刷新查看");
+  return {
+    post: {
+      key: { id: "pin:" + id, host: accountHost(context) },
+      createdAt: nowIso(),
+      content: { format: "html", value: html },
+      sourceLanguages: zhihuSourceLanguages(body),
+      detailType: "article",
+      url: ZHIHU_ORIGIN + "/pin/" + id,
+    },
+  };
+}
+
+function articleVoteState(target: JsonObject): boolean | undefined {
+  const relation = asObject(asObject(target.reaction)?.relation);
+  const value = relation?.vote ?? asObject(target.relationship)?.voting ?? target.voting;
+  if (value === "up" || value === 1) return true;
+  if (value === "neutral" || value === "down" || value === 0 || value === -1) return false;
+  return undefined;
+}
+
+function questionIdFromKey(key: string): string {
+  const id = /^question:(\d+)$/.exec(key)?.[1];
+  if (!id) fail("NotFound", "无法识别这个知乎问题");
+  return id;
+}
+
+async function loadQuestionPost(
+  id: string,
+  context: PluginInvocationContextV1,
+): Promise<PostV1> {
+  const question = await apiGet(
+    "/api/v4/questions/" + id + "?include=" + QUESTION_DETAIL_INCLUDE,
+    context,
+    true,
+  );
+  if (!question) fail("NotFound", "这个知乎问题不存在或已被删除");
+  const post = mapQuestionPreview({ ...question, id }, context, undefined, undefined, true);
+  if (!post) fail("InvalidResponse", "知乎问题资料不完整");
+  return post;
+}
+
+async function loadQuestionAnswers(
+  id: string,
+  page: PageRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<PageV1<TimelineItemV1>> {
+  if (page.direction === "newer") fail("Unsupported", "知乎问题不支持更新方向的分页");
+  const limit = clampLimit(page.limit);
+  const refresh = page.direction === "refresh";
+  const answerLimit = refresh ? limit - 1 : limit;
+  if (answerLimit === 0) {
+    const post = await loadQuestionPost(id, context);
+    return { items: [{ type: "post", post }], olderCursor: "0", endReached: false };
+  }
+  const endpoint = "/api/v4/questions/" + id + "/feeds";
+  const path = pagedPath(endpoint, "?limit=" + answerLimit + "&order=default", page);
+  const [root, response] = await Promise.all([
+    refresh ? loadQuestionPost(id, context) : undefined,
+    apiGet(path, context),
+  ]);
+  const items: TimelineItemV1[] = root ? [{ type: "post", post: root }] : [];
+  for (const value of asArray(response.data)) {
+    const entry = asObject(value);
+    const answer = asObject(entry?.target);
+    if (!answer || answer.type !== "answer") continue;
+    const question = asObject(answer.question);
+    const post = mapAnswerPreview({ ...answer, question: { ...question, id } }, undefined, context, undefined, false);
+    if (post) items.push({ type: "post", post });
+  }
+  return pageFromNextUrl(response, endpoint, path, items);
+}
+
+async function loadPinComments(
+  ref: ArticleRef,
+  page: PageRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<PageV1<TimelineItemV1>> {
+  const endpoint = "/api/v4/comment_v5/pins/" + ref.id + "/root_comment";
+  const path = pagedPath(endpoint, "?order_by=score&limit=" + clampLimit(page.limit), page);
+  const root = await apiGet(path, context);
+  const items: TimelineItemV1[] = [];
+  for (const value of asArray(root.data)) {
+    const item = mapComment(value, ref, context);
+    if (item) items.push({ type: "post", post: item });
+  }
+  return pageFromNextUrl(root, endpoint, path, items);
+}
+
+async function loadCollectionTabs(
+  page: PageRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<PageV1<TimelineSectionV1>> {
+  if (page.direction === "newer") fail("Unsupported", "知乎收藏夹不支持更新方向的分页");
+  await readAuth();
+  if (!context.accountId) fail("AuthenticationRequired", "请先登录知乎");
+  const member = await memberSubresourceId(context.accountId, context);
+  const endpoint = "/api/v4/people/" + encodeURIComponent(member) + "/collections";
+  const path = pagedPath(endpoint, "?limit=" + clampLimit(page.limit) + "&offset=0", page);
+  const root = await apiGet(path, context);
+  const items: TimelineDescriptorV1[] = [];
+  for (const value of asArray(root.data)) {
+    const collection = asObject(value);
+    const id = numericId(collection?.id);
+    const title = text(collection?.title).trim();
+    if (!id || !title) continue;
+    items.push({ id: "collection-" + id, title: { value: title }, icon: "Bookmark" });
+  }
+  const sections: TimelineSectionV1[] = items.length ? [{
+    id: "collections",
+    title: { key: "timeline.collections.title", fallback: "Collections" },
+    timelines: { items, endReached: true },
+  }] : [];
+  return pageFromNextUrl(root, endpoint, path, sections);
+}
+
+async function loadCollection(
+  id: string,
+  page: PageRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<PageV1<TimelineItemV1>> {
+  if (page.direction === "newer") fail("Unsupported", "知乎收藏夹不支持更新方向的分页");
+  const endpoint = "/api/v4/collections/" + id + "/items";
+  const path = pagedPath(endpoint, "?limit=" + clampLimit(page.limit) + "&offset=0", page);
+  const root = await apiGet(path, context);
+  const items: TimelineItemV1[] = [];
+  for (const value of asArray(root.data)) {
+    const post = mapFeedTarget(asObject(asObject(value)?.content), context);
+    if (post) items.push({ type: "post", post });
+  }
+  return pageFromNextUrl(root, endpoint, path, items);
+}
+
+async function loadNotifications(
+  page: PageRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<PageV1<TimelineItemV1>> {
+  if (page.direction === "newer") fail("Unsupported", "知乎通知不支持更新方向的分页");
+  const endpoint = "/api/v4/notifications/v2/recent";
+  const path = pagedPath(endpoint, "?limit=" + clampLimit(page.limit) + "&entry_name=all&offset=0", page);
+  const root = await apiGet(path, context);
+  const items: TimelineItemV1[] = [];
+  for (const value of asArray(root.data)) {
+    const event = asObject(value);
+    const id = text(event?.id).trim();
+    const createdAt = isoFromTimestamp(event?.create_time);
+    const content = asObject(event?.content);
+    if (!id || !createdAt || !content) continue;
+    const actors = Array.isArray(content.actors) ? content.actors : [content.actors];
+    const actor = mapAuthor(actors[0], context);
+    const summary = actors.map((entry) => text(asObject(entry)?.name)).filter(Boolean).join("、");
+    const target = asObject(content.target);
+    const comment = asObject(event?.target);
+    const body = [
+      [summary, stripTags(text(content.verb)).trim()].filter(Boolean).join(" "),
+      stripTags(text(comment?.type === "comment" ? comment.content : "")).trim(),
+      stripTags(text(target?.text) || text(content.text)).trim(),
+    ].filter(Boolean).join("\n");
+    if (!body) continue;
+    items.push({
+      type: "message",
+      message: {
+        key: { id: "notification:" + id, host: accountHost(context) },
+        createdAt,
+        icon: "Notification",
+        actor,
+        text: body,
+        target: zhihuNavigationTarget(text(target?.link), context),
+      },
+    });
+  }
+  return pageFromNextUrl(root, endpoint, path, items);
+}
+
+function zhihuNavigationTarget(raw: string, context: PluginInvocationContextV1): NavigationTargetV1 | undefined {
+  const url = normalizeLinkUrl(raw);
+  if (!url) return undefined;
+  const host = accountHost(context);
+  const answer = /^https:\/\/www\.zhihu\.com\/(?:question\/\d+\/)?answer\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+  if (answer) return { type: "article", key: { id: "answer:" + answer, host } };
+  const pin = /^https:\/\/www\.zhihu\.com\/pin\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+  if (pin) return { type: "article", key: { id: "pin:" + pin, host } };
+  const article = /^https:\/\/zhuanlan\.zhihu\.com\/p\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+  if (article) return { type: "article", key: { id: "article:" + article, host } };
+  const question = /^https:\/\/www\.zhihu\.com\/question\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+  if (question) return { type: "post", key: { id: "question:" + question, host } };
+  const profile = /^https:\/\/www\.zhihu\.com\/people\/([\w-]+)(?:[/?#]|$)/.exec(url)?.[1];
+  if (profile) return { type: "profile", key: { id: profile, host } };
+  return { type: "link", url };
+}
+
+async function loadSearch<T>(
+  request: SearchRequestV1,
+  type: "general" | "people",
+  context: PluginInvocationContextV1,
+  map: (result: JsonObject) => T | undefined,
+): Promise<PageV1<T>> {
+  const query = request.query.trim();
+  if (!query) return { items: [], endReached: true };
+  const endpoint = "/api/v4/search_v3";
+  const path = pagedPath(
+    endpoint,
+    "?gk_version=gz-gaokao&t=" + type + "&q=" + encodeURIComponent(query) +
+      "&correction=1&offset=0&limit=" + clampLimit(request.page.limit) +
+      "&search_source=Normal&show_all_topics=0",
+    request.page,
+  );
+  const root = await apiGet(path, context);
+  const items: T[] = [];
+  for (const value of asArray(root.data)) {
+    const entry = asObject(value);
+    if (entry?.type !== "search_result") continue;
+    const result = asObject(entry.object);
+    if (!result) continue;
+    const item = map(result);
+    if (item) items.push(item);
+  }
+  return pageFromNextUrl(root, endpoint, path, items);
+}
+
+function pagedPath(endpoint: string, query: string, page: PageRequestV1): string {
+  if (page.direction === "refresh" || page.cursor === "0") return endpoint + query;
+  const path = nextPathForEndpoint(endpoint, page.cursor);
+  if (!path) fail("Validation", "知乎分页游标无效");
+  return path;
+}
+
+function nextPathForEndpoint(endpoint: string, value: unknown): string | undefined {
+  const path = text(value).trim().replace(/^(?:https?:)?\/\/www\.zhihu\.com(?=\/)/i, "");
+  return path.startsWith(endpoint + "?") && !/[\s#\\]/.test(path) ? path : undefined;
+}
+
+function pageFromNextUrl<T>(
+  root: JsonObject,
+  endpoint: string,
+  currentPath: string,
+  items: T[],
+): PageV1<T> {
+  const paging = asObject(root.paging);
+  const next = nextPathForEndpoint(endpoint, paging?.next);
+  const olderCursor = paging?.is_end !== true && next !== currentPath ? next : undefined;
+  return { items, olderCursor, endReached: olderCursor === undefined };
+}
 
 async function loadRecommend(
   page: PageRequestV1,
@@ -438,16 +859,18 @@ function mapAnswerPreview(
   thumbnail: string | undefined,
   context: PluginInvocationContextV1,
   createdAtOverride?: string,
+  showQuestionTitle = true,
 ): PostV1 | undefined {
   const id = text(target.id).trim();
   if (!/^\d+$/.test(id)) return undefined;
   const question = asObject(target.question);
   const questionId = text(question?.id).trim();
-  const title = text(question?.title).trim();
+  const title = showQuestionTitle ? text(question?.title).trim() : "";
   const excerpt = stripTags(
     text(target.excerpt) || text(target.content),
   ).trim();
   const keyId = "answer:" + id;
+  const voteCount = numberOrUndefined(target.voteup_count);
   return {
     key: { id: keyId, host: accountHost(context) },
     author: mapAuthor(target.author, context),
@@ -468,7 +891,8 @@ function mapAnswerPreview(
         "/answer/" +
         encodeURIComponent(id)
       : "https://www.zhihu.com/answer/" + encodeURIComponent(id),
-    favouritesCount: numberOrUndefined(target.voteup_count),
+    favouritesCount: voteCount,
+    actions: contentActions(target, articleVoteState(target), voteCount),
     repliesCount: numberOrUndefined(target.comment_count),
   };
 }
@@ -486,6 +910,7 @@ function mapArticlePreview(
     text(target.excerpt) || text(target.content),
   ).trim();
   const keyId = "article:" + id;
+  const voteCount = numberOrUndefined(target.voteup_count);
   return {
     key: { id: keyId, host: accountHost(context) },
     author: mapAuthor(target.author, context),
@@ -505,7 +930,8 @@ function mapArticlePreview(
       imageMedia(text(target.image_url), keyId + "-cover"),
     detailType: "article",
     url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
-    favouritesCount: numberOrUndefined(target.voteup_count),
+    favouritesCount: voteCount,
+    actions: contentActions(target, articleVoteState(target), voteCount),
     repliesCount: numberOrUndefined(target.comment_count),
   };
 }
@@ -514,13 +940,15 @@ function mapPinPreview(
   target: JsonObject,
   context: PluginInvocationContextV1,
 ): PostV1 | undefined {
-  const id = text(target.id).trim();
+  const urlId = /^https?:\/\/www\.zhihu\.com\/pin\/(\d+)(?:[/?#]|$)/i.exec(text(target.url))?.[1];
+  const id = numericId(target.id_str) ?? numericId(target.id) ?? urlId;
   if (!id) return undefined;
   const excerpt = pinExcerpt(target);
-  const title = text(target.excerpt_title).trim() || (excerpt ? "" : "想法");
-  const url = normalizeLinkUrl(text(target.url)) ||
-    "https://www.zhihu.com/pin/" + encodeURIComponent(id);
+  const title = pinTitle(target) || (excerpt ? "" : pinLabel(context));
   const keyId = "pin:" + id;
+  const voteCount = numberOrUndefined(target.like_count ?? target.reaction_count);
+  const virtuals = asObject(target.virtuals);
+  const liked = virtuals?.is_liked ?? virtuals?.isLiked ?? target.is_liked;
   return {
     key: { id: keyId, host: accountHost(context) },
     author: mapAuthor(target.author, context),
@@ -529,11 +957,10 @@ function mapPinPreview(
     content: { format: "html", value: titleAndBody(title, excerpt) },
     sourceLanguages: zhihuSourceLanguages(title, excerpt),
     media: pinMedia(target, keyId),
-    detailType: "link",
-    url,
-    favouritesCount: numberOrUndefined(
-      target.like_count ?? target.reaction_count,
-    ),
+    detailType: "article",
+    url: ZHIHU_ORIGIN + "/pin/" + id,
+    favouritesCount: voteCount,
+    actions: contentActions(target, typeof liked === "boolean" ? liked : undefined, voteCount),
     repliesCount: numberOrUndefined(target.comment_count),
   };
 }
@@ -543,13 +970,13 @@ function mapQuestionPreview(
   context: PluginInvocationContextV1,
   hotText?: string,
   rank?: number,
+  full = false,
 ): PostV1 | undefined {
-  const id = text(target.id).trim();
+  const id = numericId(target.id);
   const title = text(target.title).trim();
   if (!id || !title) return undefined;
-  const excerpt = stripTags(
-    text(target.detail) || text(target.excerpt),
-  ).trim();
+  const detail = text(target.detail) || text(target.excerpt);
+  const excerpt = stripTags(detail).trim();
   const heading = rank === undefined ? title : "#" + String(rank) + " " + title;
   const answerCount = numberOrUndefined(target.answer_count);
   const answerUnit = context.locale.toLowerCase().startsWith("zh")
@@ -558,17 +985,22 @@ function mapQuestionPreview(
   const answers = answerCount === undefined ? "" : String(answerCount) + answerUnit;
   const metadata = [hotText, answers].filter(Boolean).join(" · ");
   const body = [metadata, excerpt === title ? "" : excerpt].filter(Boolean).join("\n");
+  const content = full
+    ? "<p><b>" + escapeHtml(title) + "</b></p>" +
+      (metadata ? "<p>" + escapeHtml(metadata) + "</p>" : "") + cleanHtml(detail)
+    : titleAndBody(heading, body);
   return {
     key: { id: "question:" + id, host: accountHost(context) },
+    author: full ? mapAuthor(target.author, context) : undefined,
     createdAt:
       isoFromTimestamp(target.created ?? target.created_time) ?? nowIso(),
     content: {
       format: "html",
-      value: titleAndBody(heading, body),
+      value: content,
     },
     sourceLanguages: zhihuSourceLanguages(title, excerpt),
     media: imageMedia(text(target.thumbnail), "question:" + id + "-cover"),
-    detailType: "link",
+    detailType: "post",
     url: "https://www.zhihu.com/question/" + encodeURIComponent(id),
   };
 }
@@ -756,6 +1188,50 @@ function mapArticleDetail(
   };
 }
 
+function mapPinDetail(
+  pin: JsonObject,
+  key: EntityKeyV1,
+  id: string,
+  context: PluginInvocationContextV1,
+): ArticleV1 {
+  const html = text(pin.content_html).trim();
+  const main = html ? cleanHtml(html).trim() : "";
+  const parts = main ? [main] : [];
+  const images = new Set<string>();
+  const links = new Set<string>();
+  for (const value of asArray(pin.content)) {
+    const item = asObject(value);
+    if (!item) continue;
+    if (!main && item.type === "text") {
+      const body = cleanHtml(text(item.content)).trim();
+      if (body) parts.push(body);
+    }
+    for (const image of pinImages(item)) {
+      if (!images.has(image.url) && !main.includes('src="' + escapeAttribute(image.url) + '"')) {
+        images.add(image.url);
+        parts.push('<img src="' + escapeAttribute(image.url) + '" />');
+      }
+    }
+    if (item.type === "link_card") {
+      const url = normalizeLinkUrl(text(item.url));
+      if (url && !links.has(url) && !main.includes('href="' + escapeAttribute(url) + '"')) {
+        links.add(url);
+        const title = text(item.title).trim() || url;
+        parts.push('<p><a href="' + escapeAttribute(url) + '">' + escapeHtml(title) + "</a></p>");
+      }
+    }
+  }
+  const fallback = pinExcerpt(pin);
+  return {
+    key,
+    title: pinTitle(pin) || pinLabel(context),
+    author: mapAuthor(pin.author, context),
+    createdAt: isoFromTimestamp(pin.created ?? pin.created_time),
+    content: { format: "html", value: parts.join("\n") || escapeHtml(fallback) || " " },
+    url: ZHIHU_ORIGIN + "/pin/" + id,
+  };
+}
+
 function mapComment(
   value: unknown,
   ref: ArticleRef,
@@ -767,9 +1243,8 @@ function mapComment(
   if (!id) return undefined;
   const authorObject =
     asObject(asObject(comment.author)?.member) ?? asObject(comment.author);
-  const replyTo = text(
-    asObject(asObject(comment.reply_to_author)?.member)?.name,
-  ).trim();
+  const replyAuthor = asObject(comment.reply_to_author);
+  const replyTo = text((asObject(replyAuthor?.member) ?? replyAuthor)?.name).trim();
   const body = cleanHtml(text(comment.content));
   const prefix = replyTo
     ? "<p>回复 @" + escapeHtml(replyTo) + "：</p>"
@@ -777,7 +1252,9 @@ function mapComment(
   const url =
     ref.kind === "answer"
       ? "https://www.zhihu.com/answer/" + encodeURIComponent(ref.id)
-      : "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(ref.id);
+      : ref.kind === "pin"
+        ? ZHIHU_ORIGIN + "/pin/" + ref.id
+        : "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(ref.id);
   return {
     key: { id: "comment:" + id, host: accountHost(context) },
     author: mapAuthor(authorObject, context),
@@ -786,7 +1263,7 @@ function mapComment(
     sourceLanguages: zhihuSourceLanguages(stripTags(body)),
     detailType: "link",
     url,
-    favouritesCount: numberOrUndefined(comment.vote_count),
+    favouritesCount: numberOrUndefined(comment.vote_count ?? comment.like_count),
   };
 }
 
@@ -914,7 +1391,7 @@ async function apiPost(
 }
 
 async function apiRequest(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "DELETE",
   path: string,
   body: JsonObject | undefined,
   context: PluginInvocationContextV1,
@@ -926,10 +1403,7 @@ async function apiRequest(
     url: context.origin + path,
     cookies: auth.cookies,
     headers: signedHeaders(path, auth, method === "POST"),
-    body:
-      method === "POST"
-        ? { type: "json", value: (body ?? {}) as JsonValue }
-        : undefined,
+    body: body === undefined ? undefined : { type: "json", value: body as JsonValue },
   });
   if (response.status === 401) {
     fail("AuthenticationRequired", "知乎登录已过期，请重新登录");
@@ -942,7 +1416,7 @@ async function apiRequest(
     fail("Remote", "知乎接口返回错误（" + String(response.status) + "）");
   }
   if (response.status === 204 || !response.body.trim()) {
-    if (method === "POST") return {};
+    if (method !== "GET") return {};
     fail("InvalidResponse", "知乎没有返回内容");
   }
   const root = parseJsonObject(response.body);
@@ -1029,7 +1503,7 @@ async function hostRequest(request: HttpRequestV1): Promise<HttpResponseV1> {
 }
 
 function parseArticleKey(id: string): ArticleRef | undefined {
-  const match = /^(answer|article):(\d+)$/.exec(id);
+  const match = /^(answer|article|pin):(\d+)$/.exec(id);
   if (!match) return undefined;
   return { kind: match[1] as ArticleKind, id: match[2] };
 }
@@ -1104,33 +1578,45 @@ function pinExcerpt(target: JsonObject): string {
     if (content) parts.push(content);
   }
   const textValue = parts.join(" ").trim();
-  return textValue || stripTags(text(target.excerpt_title)).trim();
+  return textValue || stripTags(text(target.content_html) || text(target.excerpt_title)).trim();
+}
+
+function pinTitle(pin: JsonObject): string {
+  const textItem = asArray(pin.content).map(asObject).find((item) => item?.type === "text");
+  return text(textItem?.title).trim();
+}
+
+function pinLabel(context: PluginInvocationContextV1): string {
+  return context.locale.toLowerCase().startsWith("zh") ? "想法" : "Pin";
+}
+
+function pinImages(item: JsonObject): { url: string; previewUrl?: string }[] {
+  const images: { url: string; previewUrl?: string }[] = [];
+  const direct = normalizeMediaUrl(
+    text(item.original_url) || text(item.image_url) || (item.type === "image" ? text(item.url) : ""),
+  );
+  if (direct) images.push({ url: direct, previewUrl: normalizeMediaUrl(text(item.thumbnail)) });
+  for (const value of asArray(item.image_urls)) {
+    const url = normalizeMediaUrl(text(value));
+    if (url) images.push({ url });
+  }
+  return images;
 }
 
 function pinMedia(target: JsonObject, keyId: string): MediaV1[] | undefined {
-  const urls: string[] = [];
+  const media: MediaV1[] = [];
+  const urls = new Set<string>();
   for (const value of asArray(target.content)) {
     const item = asObject(value);
     if (!item) continue;
-    const direct = normalizeMediaUrl(text(item.image_url));
-    if (direct) urls.push(direct);
-    for (const nested of asArray(item.image_urls)) {
-      const url = normalizeMediaUrl(text(nested));
-      if (url) urls.push(url);
+    for (const image of pinImages(item)) {
+      if (urls.has(image.url)) continue;
+      urls.add(image.url);
+      media.push({ id: keyId + "-" + media.length, type: "image", ...image });
+      if (media.length === 9) return media;
     }
   }
-  const unique: string[] = [];
-  for (const url of urls) {
-    if (!unique.includes(url)) unique.push(url);
-    if (unique.length >= 9) break;
-  }
-  return unique.length
-    ? unique.map((url, index) => ({
-        id: keyId + "-" + String(index),
-        type: "image" as const,
-        url,
-      }))
-    : undefined;
+  return media.length ? media : undefined;
 }
 
 function imageMedia(
@@ -1284,6 +1770,12 @@ function text(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number") return String(value);
   return "";
+}
+
+function numericId(value: unknown): string | undefined {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) return undefined;
+  const id = text(value).trim();
+  return /^\d+$/.test(id) ? id : undefined;
 }
 
 function numberOrUndefined(value: unknown): number | undefined {

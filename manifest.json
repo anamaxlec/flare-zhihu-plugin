@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.maxlec.zhihu",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "defaultLocale": "zh-Hans",
   "name": { "key": "plugin.name", "fallback": "Zhihu" },
   "description": { "key": "plugin.description", "fallback": "Zhihu hot list, recommendations and answers" },
@@ -47,8 +47,38 @@
       "flare.datasource.article/v1": {
         "operations": {
           "detail": {},
-          "comments": {}
+          "comments": { "directions": ["refresh", "older"] }
         }
+      },
+      "flare.datasource.post/v1": {
+        "operations": {
+          "detail": {},
+          "context": { "directions": ["refresh", "older"] },
+          "mutate": {}
+        }
+      },
+      "flare.datasource.tab-catalog/v1": {
+        "operations": {
+          "page": { "directions": ["refresh", "older"] }
+        }
+      },
+      "flare.datasource.notification/v1": {
+        "operations": {
+          "page": { "directions": ["refresh", "older"] }
+        },
+        "notificationFilters": ["all"]
+      },
+      "flare.datasource.search/v1": {
+        "operations": {
+          "posts": { "directions": ["refresh", "older"] },
+          "profiles": { "directions": ["refresh", "older"] },
+          "discoverPosts": { "directions": ["refresh", "older"] },
+          "discoverProfiles": { "directions": ["refresh", "older"] },
+          "discoverHashtags": { "directions": ["refresh"] }
+        }
+      },
+      "flare.datasource.compose/v1": {
+        "operations": { "publish": {} }
       },
       "flare.datasource.profile/v1": {
         "operations": {
@@ -66,6 +96,10 @@
         },
         "relationActions": ["follow"]
       }
+    },
+    "composeDefaults": {
+      "text": { "maxLength": 1000 },
+      "visibility": { "allowed": ["public"], "default": "public" }
     },
     "timelines": [
       {
@@ -86,6 +120,16 @@
         "title": { "key": "timeline.following.title", "fallback": "Following" },
         "icon": "Follow",
         "display": "List"
+      }
+    ],
+    "deepLinks": [
+      {
+        "origin": "$accountOrigin",
+        "path": [
+          { "type": "literal", "value": "people" },
+          { "type": "capture", "name": "handle" }
+        ],
+        "target": { "type": "Profile", "value": "{handle}" }
       }
     ],
     "profileTabs": [

@@ -3,6 +3,11 @@
   // src/plugin.ts
   var TIMELINE_CAPABILITY = "flare.datasource.timeline/v1";
   var ARTICLE_CAPABILITY = "flare.datasource.article/v1";
+  var POST_CAPABILITY = "flare.datasource.post/v1";
+  var TAB_CATALOG_CAPABILITY = "flare.datasource.tab-catalog/v1";
+  var NOTIFICATION_CAPABILITY = "flare.datasource.notification/v1";
+  var SEARCH_CAPABILITY = "flare.datasource.search/v1";
+  var COMPOSE_CAPABILITY = "flare.datasource.compose/v1";
   var PROFILE_CAPABILITY = "flare.datasource.profile/v1";
   var RELATION_CAPABILITY = "flare.datasource.relation/v1";
   var ZHIHU_HOST = "www.zhihu.com";
@@ -12,10 +17,12 @@
   var MEMBER_INCLUDE = "id,name,url_token,avatar_url,headline,description,cover_url,gender,follower_count,following_count,answer_count,articles_count,is_following,is_followed,user_type";
   var ANSWER_DETAIL_INCLUDE = "content,excerpt,voteup_count,comment_count,question.title,question.id,author.name,author.url_token,author.avatar_url,author.headline,created_time,updated_time";
   var ARTICLE_DETAIL_INCLUDE = "content,excerpt,voteup_count,comment_count,author.name,author.url_token,author.avatar_url,author.headline,created,updated,image_url";
+  var QUESTION_DETAIL_INCLUDE = "detail,excerpt,author,answer_count,created,created_time";
   var RECOMMEND_PATH = "/api/v3/feed/topstory/recommend";
   var PAGE_SIZE = 20;
   var MAX_PAGE_SIZE = 20;
   var PREVIEW_LENGTH = 240;
+  var COMPOSE_LENGTH = 1e3;
   var URL_TOKEN_CACHE = /* @__PURE__ */ new Map();
   defineFlareSocialPlugin({
     detector: {
@@ -93,6 +100,11 @@
               capabilities: {
                 [TIMELINE_CAPABILITY]: ["page"],
                 [ARTICLE_CAPABILITY]: ["detail", "comments"],
+                [POST_CAPABILITY]: ["detail", "context", "mutate"],
+                [TAB_CATALOG_CAPABILITY]: ["page"],
+                [NOTIFICATION_CAPABILITY]: ["page"],
+                [SEARCH_CAPABILITY]: ["posts", "profiles", "discoverPosts", "discoverProfiles", "discoverHashtags"],
+                [COMPOSE_CAPABILITY]: ["publish"],
                 [PROFILE_CAPABILITY]: [
                   "byId",
                   "byHandle",
@@ -122,16 +134,80 @@
           if (request.timelineId === "following") {
             return loadFollowing(request.page, context);
           }
+          const collection = /^collection-(\d+)$/.exec(request.timelineId);
+          if (collection) return loadCollection(collection[1], request.page, context);
           fail("Unsupported", "\u672A\u77E5\u7684\u77E5\u4E4E\u65F6\u95F4\u7EBF\uFF1A" + request.timelineId);
+        }
+      },
+      tabCatalog: {
+        page: loadCollectionTabs
+      },
+      notification: {
+        async page(request, context) {
+          return loadNotifications(request.page, context);
+        }
+      },
+      search: {
+        async posts(request, context) {
+          return loadSearch(request, "general", context, (result) => {
+            const post = mapFeedTarget(result, context);
+            return post ? { type: "post", post } : void 0;
+          });
+        },
+        async profiles(request, context) {
+          return loadSearch(request, "people", context, (result) => result.type === "people" ? mapAuthor(result, context) : void 0);
+        },
+        async discoverPosts(request, context) {
+          return loadHot(request.page, context);
+        },
+        async discoverProfiles(request, context) {
+          const recommendations = await loadRecommend(request.page, context);
+          const profiles = /* @__PURE__ */ new Map();
+          for (const item of recommendations.items ?? []) {
+            if (item.type !== "post" || !item.post.author) continue;
+            const author = item.post.author;
+            profiles.set(author.key.id, author);
+          }
+          return { ...recommendations, items: [...profiles.values()] };
+        },
+        async discoverHashtags(request, context) {
+          const root = await apiGet("/api/v4/search/hot_search", context);
+          const limit = clampLimit(request.page.limit);
+          const words = /* @__PURE__ */ new Set();
+          for (const value of asArray(asObject(root.top_search)?.words)) {
+            const query = text(asObject(value)?.query).trim();
+            if (query && query.length <= 1024) words.add(query);
+            if (words.size === limit) break;
+          }
+          return { items: [...words].map((name) => ({ name })), endReached: true };
+        }
+      },
+      compose: {
+        publish: publishContent
+      },
+      post: {
+        async detail(request, context) {
+          const ref = parseArticleKey(request.key.id);
+          if (ref) return { post: await loadContentPost(ref, context) };
+          return { post: await loadQuestionPost(questionIdFromKey(request.key.id), context) };
+        },
+        async context(request, context) {
+          return loadQuestionAnswers(questionIdFromKey(request.key.id), request.page, context);
+        },
+        async mutate(request, context) {
+          const ref = parseArticleKey(request.key.id);
+          if (!ref || request.action !== "Favourite" && request.action !== "Unfavourite") {
+            fail("Unsupported", "\u8FD9\u6761\u77E5\u4E4E\u5185\u5BB9\u4E0D\u652F\u6301\u6B64\u64CD\u4F5C");
+          }
+          return mutateVote(ref, request.action === "Favourite", context);
         }
       },
       article: {
         async detail(request, context) {
           const ref = parseArticleKey(request.key.id);
           if (!ref) fail("NotFound", "\u65E0\u6CD5\u8BC6\u522B\u8FD9\u6761\u77E5\u4E4E\u5185\u5BB9");
-          const path = ref.kind === "answer" ? "/api/v4/answers/" + encodeURIComponent(ref.id) + "?include=" + ANSWER_DETAIL_INCLUDE : "/api/v4/articles/" + encodeURIComponent(ref.id) + "?include=" + ARTICLE_DETAIL_INCLUDE;
-          const root = await apiGet(path, context, true);
-          if (!root) fail("NotFound", "\u8FD9\u6761\u77E5\u4E4E\u5185\u5BB9\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664");
+          const root = await loadContent(ref, context);
+          if (ref.kind === "pin") return mapPinDetail(root, request.key, ref.id, context);
           return mapArticleDetail(ref, root, request.key, context);
         },
         async comments(request, context) {
@@ -140,6 +216,7 @@
           if (request.page.direction === "newer") {
             fail("Unsupported", "\u77E5\u4E4E\u8BC4\u8BBA\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
           }
+          if (ref.kind === "pin") return loadPinComments(ref, request.page, context);
           const offset = parseOffset(request.page);
           const limit = clampLimit(request.page.limit);
           const plural = ref.kind === "answer" ? "answers" : "articles";
@@ -223,6 +300,282 @@
       }
     }
   });
+  function contentEndpoint(ref) {
+    return "/api/v4/" + ref.kind + "s/" + ref.id;
+  }
+  async function loadContent(ref, context) {
+    const include = ref.kind === "pin" ? "topics" : (ref.kind === "answer" ? ANSWER_DETAIL_INCLUDE : ARTICLE_DETAIL_INCLUDE) + ",reaction,relationship.voting";
+    const root = await apiGet(contentEndpoint(ref) + "?include=" + include, context, true);
+    if (!root || root.is_deleted === true) fail("NotFound", "\u8FD9\u6761\u77E5\u4E4E\u5185\u5BB9\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664");
+    return root;
+  }
+  async function loadContentPost(ref, context) {
+    const root = { ...await loadContent(ref, context), id: ref.id };
+    const post = ref.kind === "pin" ? mapPinPreview(root, context) : ref.kind === "answer" ? mapAnswerPreview(root, void 0, context) : mapArticlePreview(root, void 0, context);
+    if (!post) fail("InvalidResponse", "\u77E5\u4E4E\u5185\u5BB9\u8D44\u6599\u4E0D\u5B8C\u6574");
+    return post;
+  }
+  async function mutateVote(ref, active, context) {
+    const post = await loadContentPost(ref, context);
+    if (post.actions?.[0]?.active === active) return { type: "updatedPost", post };
+    const endpoint = contentEndpoint(ref) + "/voters";
+    const response = ref.kind === "pin" ? await apiRequest(active ? "POST" : "DELETE", endpoint + "/up", void 0, context, false) : await apiPost(endpoint, ref.kind === "answer" ? { type: active ? "up" : "neutral" } : { voting: active ? 1 : 0 }, context);
+    const count = numberOrUndefined(response?.liked_count ?? response?.voteup_count) ?? post.favouritesCount;
+    const confirmed = typeof response?.is_liked === "boolean" ? response.is_liked : active;
+    const actions = voteActions(confirmed, count) ?? [];
+    const reply = post.actions?.find(({ action }) => action === "Reply");
+    if (reply) actions.push(reply);
+    return {
+      type: "updatedPost",
+      post: { ...post, favouritesCount: count, actions }
+    };
+  }
+  function voteActions(active, count) {
+    if (active === void 0 && count === void 0) return void 0;
+    return [{ action: active ? "Unfavourite" : "Favourite", active, count }];
+  }
+  function contentActions(target, active, count) {
+    const actions = voteActions(active, count) ?? [];
+    if (target.can_comment !== false && target.admin_closed_comment !== true && target.comment_permission !== "none" && target.comment_permission !== "closed") {
+      actions.push({ action: "Reply" });
+    }
+    return actions;
+  }
+  async function publishContent(request, context) {
+    const body = request.text.trim();
+    if (!body || body.length > COMPOSE_LENGTH) {
+      fail("Validation", "\u77E5\u4E4E\u5185\u5BB9\u9700\u8981 1 \u81F3 " + COMPOSE_LENGTH + " \u4E2A\u5B57\u7B26");
+    }
+    if (request.assets.length || request.poll || request.sensitive || request.spoilerText || request.visibility !== "public" || request.languages.length) {
+      fail("Unsupported", "\u77E5\u4E4E\u63D2\u4EF6\u76EE\u524D\u652F\u6301\u516C\u5F00\u53D1\u5E03\u7EAF\u6587\u5B57");
+    }
+    const html = body.split(/\r?\n/).map((line) => "<p>" + escapeHtml(line) + "</p>").join("");
+    if (request.replyTo) {
+      const ref = parseArticleKey(request.replyTo.id);
+      if (!ref || request.replyTo.host !== accountHost(context)) {
+        fail("Unsupported", "\u53EA\u652F\u6301\u8BC4\u8BBA\u77E5\u4E4E\u56DE\u7B54\u3001\u6587\u7AE0\u548C\u60F3\u6CD5");
+      }
+      const endpoint = "/api/v4/comment_v5/" + ref.kind + "s/" + ref.id + "/comment";
+      const response2 = await apiPost(endpoint, { content: html }, context);
+      const post = mapComment(response2, ref, context);
+      if (!post) fail("InvalidResponse", "\u77E5\u4E4E\u6CA1\u6709\u8FD4\u56DE\u5DF2\u53D1\u9001\u7684\u8BC4\u8BBA");
+      return { post: { ...post, replyTo: request.replyTo } };
+    }
+    const auth = await readAuth();
+    if (!auth.xsrf) fail("AuthenticationRequired", "\u53D1\u5E03\u60F3\u6CD5\u9700\u8981\u91CD\u65B0\u767B\u5F55\u77E5\u4E4E");
+    const response = await apiPost("/api/v4/content/publish", {
+      action: "pin",
+      data: {
+        publish: { traceId: String(Date.now()) + "," + await flare.crypto.uuid() },
+        commentsPermission: { comment_permission: "all" },
+        extra_info: { view_permission: "all", publisher: "pc" },
+        draft: { disabled: 1 },
+        hybrid: { html, textLength: body.replace(/\s+/g, " ").length }
+      }
+    }, context);
+    if (response.message !== "success") {
+      fail("Remote", text(response.toast_message) || "\u77E5\u4E4E\u672A\u786E\u8BA4\u53D1\u5E03\u60F3\u6CD5");
+    }
+    const rawResult = asObject(response.data)?.result;
+    const result = asObject(rawResult) ?? parseJsonObject(text(rawResult));
+    const id = numericId(asObject(result?.publish)?.id ?? result?.id);
+    if (!id) fail("InvalidResponse", "\u77E5\u4E4E\u5DF2\u786E\u8BA4\u53D1\u5E03\uFF0C\u4F46\u672A\u8FD4\u56DE\u6709\u6548\u7684\u60F3\u6CD5 ID\uFF0C\u8BF7\u5148\u5237\u65B0\u67E5\u770B");
+    return {
+      post: {
+        key: { id: "pin:" + id, host: accountHost(context) },
+        createdAt: nowIso(),
+        content: { format: "html", value: html },
+        sourceLanguages: zhihuSourceLanguages(body),
+        detailType: "article",
+        url: ZHIHU_ORIGIN + "/pin/" + id
+      }
+    };
+  }
+  function articleVoteState(target) {
+    const relation = asObject(asObject(target.reaction)?.relation);
+    const value = relation?.vote ?? asObject(target.relationship)?.voting ?? target.voting;
+    if (value === "up" || value === 1) return true;
+    if (value === "neutral" || value === "down" || value === 0 || value === -1) return false;
+    return void 0;
+  }
+  function questionIdFromKey(key) {
+    const id = /^question:(\d+)$/.exec(key)?.[1];
+    if (!id) fail("NotFound", "\u65E0\u6CD5\u8BC6\u522B\u8FD9\u4E2A\u77E5\u4E4E\u95EE\u9898");
+    return id;
+  }
+  async function loadQuestionPost(id, context) {
+    const question = await apiGet(
+      "/api/v4/questions/" + id + "?include=" + QUESTION_DETAIL_INCLUDE,
+      context,
+      true
+    );
+    if (!question) fail("NotFound", "\u8FD9\u4E2A\u77E5\u4E4E\u95EE\u9898\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664");
+    const post = mapQuestionPreview({ ...question, id }, context, void 0, void 0, true);
+    if (!post) fail("InvalidResponse", "\u77E5\u4E4E\u95EE\u9898\u8D44\u6599\u4E0D\u5B8C\u6574");
+    return post;
+  }
+  async function loadQuestionAnswers(id, page, context) {
+    if (page.direction === "newer") fail("Unsupported", "\u77E5\u4E4E\u95EE\u9898\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
+    const limit = clampLimit(page.limit);
+    const refresh = page.direction === "refresh";
+    const answerLimit = refresh ? limit - 1 : limit;
+    if (answerLimit === 0) {
+      const post = await loadQuestionPost(id, context);
+      return { items: [{ type: "post", post }], olderCursor: "0", endReached: false };
+    }
+    const endpoint = "/api/v4/questions/" + id + "/feeds";
+    const path = pagedPath(endpoint, "?limit=" + answerLimit + "&order=default", page);
+    const [root, response] = await Promise.all([
+      refresh ? loadQuestionPost(id, context) : void 0,
+      apiGet(path, context)
+    ]);
+    const items = root ? [{ type: "post", post: root }] : [];
+    for (const value of asArray(response.data)) {
+      const entry = asObject(value);
+      const answer = asObject(entry?.target);
+      if (!answer || answer.type !== "answer") continue;
+      const question = asObject(answer.question);
+      const post = mapAnswerPreview({ ...answer, question: { ...question, id } }, void 0, context, void 0, false);
+      if (post) items.push({ type: "post", post });
+    }
+    return pageFromNextUrl(response, endpoint, path, items);
+  }
+  async function loadPinComments(ref, page, context) {
+    const endpoint = "/api/v4/comment_v5/pins/" + ref.id + "/root_comment";
+    const path = pagedPath(endpoint, "?order_by=score&limit=" + clampLimit(page.limit), page);
+    const root = await apiGet(path, context);
+    const items = [];
+    for (const value of asArray(root.data)) {
+      const item = mapComment(value, ref, context);
+      if (item) items.push({ type: "post", post: item });
+    }
+    return pageFromNextUrl(root, endpoint, path, items);
+  }
+  async function loadCollectionTabs(page, context) {
+    if (page.direction === "newer") fail("Unsupported", "\u77E5\u4E4E\u6536\u85CF\u5939\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
+    await readAuth();
+    if (!context.accountId) fail("AuthenticationRequired", "\u8BF7\u5148\u767B\u5F55\u77E5\u4E4E");
+    const member = await memberSubresourceId(context.accountId, context);
+    const endpoint = "/api/v4/people/" + encodeURIComponent(member) + "/collections";
+    const path = pagedPath(endpoint, "?limit=" + clampLimit(page.limit) + "&offset=0", page);
+    const root = await apiGet(path, context);
+    const items = [];
+    for (const value of asArray(root.data)) {
+      const collection = asObject(value);
+      const id = numericId(collection?.id);
+      const title = text(collection?.title).trim();
+      if (!id || !title) continue;
+      items.push({ id: "collection-" + id, title: { value: title }, icon: "Bookmark" });
+    }
+    const sections = items.length ? [{
+      id: "collections",
+      title: { key: "timeline.collections.title", fallback: "Collections" },
+      timelines: { items, endReached: true }
+    }] : [];
+    return pageFromNextUrl(root, endpoint, path, sections);
+  }
+  async function loadCollection(id, page, context) {
+    if (page.direction === "newer") fail("Unsupported", "\u77E5\u4E4E\u6536\u85CF\u5939\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
+    const endpoint = "/api/v4/collections/" + id + "/items";
+    const path = pagedPath(endpoint, "?limit=" + clampLimit(page.limit) + "&offset=0", page);
+    const root = await apiGet(path, context);
+    const items = [];
+    for (const value of asArray(root.data)) {
+      const post = mapFeedTarget(asObject(asObject(value)?.content), context);
+      if (post) items.push({ type: "post", post });
+    }
+    return pageFromNextUrl(root, endpoint, path, items);
+  }
+  async function loadNotifications(page, context) {
+    if (page.direction === "newer") fail("Unsupported", "\u77E5\u4E4E\u901A\u77E5\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
+    const endpoint = "/api/v4/notifications/v2/recent";
+    const path = pagedPath(endpoint, "?limit=" + clampLimit(page.limit) + "&entry_name=all&offset=0", page);
+    const root = await apiGet(path, context);
+    const items = [];
+    for (const value of asArray(root.data)) {
+      const event = asObject(value);
+      const id = text(event?.id).trim();
+      const createdAt = isoFromTimestamp(event?.create_time);
+      const content = asObject(event?.content);
+      if (!id || !createdAt || !content) continue;
+      const actors = Array.isArray(content.actors) ? content.actors : [content.actors];
+      const actor = mapAuthor(actors[0], context);
+      const summary = actors.map((entry) => text(asObject(entry)?.name)).filter(Boolean).join("\u3001");
+      const target = asObject(content.target);
+      const comment = asObject(event?.target);
+      const body = [
+        [summary, stripTags(text(content.verb)).trim()].filter(Boolean).join(" "),
+        stripTags(text(comment?.type === "comment" ? comment.content : "")).trim(),
+        stripTags(text(target?.text) || text(content.text)).trim()
+      ].filter(Boolean).join("\n");
+      if (!body) continue;
+      items.push({
+        type: "message",
+        message: {
+          key: { id: "notification:" + id, host: accountHost(context) },
+          createdAt,
+          icon: "Notification",
+          actor,
+          text: body,
+          target: zhihuNavigationTarget(text(target?.link), context)
+        }
+      });
+    }
+    return pageFromNextUrl(root, endpoint, path, items);
+  }
+  function zhihuNavigationTarget(raw, context) {
+    const url = normalizeLinkUrl(raw);
+    if (!url) return void 0;
+    const host = accountHost(context);
+    const answer = /^https:\/\/www\.zhihu\.com\/(?:question\/\d+\/)?answer\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+    if (answer) return { type: "article", key: { id: "answer:" + answer, host } };
+    const pin = /^https:\/\/www\.zhihu\.com\/pin\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+    if (pin) return { type: "article", key: { id: "pin:" + pin, host } };
+    const article = /^https:\/\/zhuanlan\.zhihu\.com\/p\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+    if (article) return { type: "article", key: { id: "article:" + article, host } };
+    const question = /^https:\/\/www\.zhihu\.com\/question\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+    if (question) return { type: "post", key: { id: "question:" + question, host } };
+    const profile = /^https:\/\/www\.zhihu\.com\/people\/([\w-]+)(?:[/?#]|$)/.exec(url)?.[1];
+    if (profile) return { type: "profile", key: { id: profile, host } };
+    return { type: "link", url };
+  }
+  async function loadSearch(request, type, context, map) {
+    const query = request.query.trim();
+    if (!query) return { items: [], endReached: true };
+    const endpoint = "/api/v4/search_v3";
+    const path = pagedPath(
+      endpoint,
+      "?gk_version=gz-gaokao&t=" + type + "&q=" + encodeURIComponent(query) + "&correction=1&offset=0&limit=" + clampLimit(request.page.limit) + "&search_source=Normal&show_all_topics=0",
+      request.page
+    );
+    const root = await apiGet(path, context);
+    const items = [];
+    for (const value of asArray(root.data)) {
+      const entry = asObject(value);
+      if (entry?.type !== "search_result") continue;
+      const result = asObject(entry.object);
+      if (!result) continue;
+      const item = map(result);
+      if (item) items.push(item);
+    }
+    return pageFromNextUrl(root, endpoint, path, items);
+  }
+  function pagedPath(endpoint, query, page) {
+    if (page.direction === "refresh" || page.cursor === "0") return endpoint + query;
+    const path = nextPathForEndpoint(endpoint, page.cursor);
+    if (!path) fail("Validation", "\u77E5\u4E4E\u5206\u9875\u6E38\u6807\u65E0\u6548");
+    return path;
+  }
+  function nextPathForEndpoint(endpoint, value) {
+    const path = text(value).trim().replace(/^(?:https?:)?\/\/www\.zhihu\.com(?=\/)/i, "");
+    return path.startsWith(endpoint + "?") && !/[\s#\\]/.test(path) ? path : void 0;
+  }
+  function pageFromNextUrl(root, endpoint, currentPath, items) {
+    const paging = asObject(root.paging);
+    const next = nextPathForEndpoint(endpoint, paging?.next);
+    const olderCursor = paging?.is_end !== true && next !== currentPath ? next : void 0;
+    return { items, olderCursor, endReached: olderCursor === void 0 };
+  }
   async function loadRecommend(page, context) {
     const limit = clampLimit(page.limit);
     const path = page.direction === "older" ? recommendPagePath(page.cursor ?? "", limit) : RECOMMEND_PATH + "?limit=" + String(limit);
@@ -346,16 +699,17 @@
     if (type === "question") return mapQuestionPreview(target, context);
     return void 0;
   }
-  function mapAnswerPreview(target, thumbnail, context, createdAtOverride) {
+  function mapAnswerPreview(target, thumbnail, context, createdAtOverride, showQuestionTitle = true) {
     const id = text(target.id).trim();
     if (!/^\d+$/.test(id)) return void 0;
     const question = asObject(target.question);
     const questionId = text(question?.id).trim();
-    const title = text(question?.title).trim();
+    const title = showQuestionTitle ? text(question?.title).trim() : "";
     const excerpt = stripTags(
       text(target.excerpt) || text(target.content)
     ).trim();
     const keyId = "answer:" + id;
+    const voteCount = numberOrUndefined(target.voteup_count);
     return {
       key: { id: keyId, host: accountHost(context) },
       author: mapAuthor(target.author, context),
@@ -368,7 +722,8 @@
       media: imageMedia(thumbnail, keyId + "-cover"),
       detailType: "article",
       url: questionId ? "https://www.zhihu.com/question/" + encodeURIComponent(questionId) + "/answer/" + encodeURIComponent(id) : "https://www.zhihu.com/answer/" + encodeURIComponent(id),
-      favouritesCount: numberOrUndefined(target.voteup_count),
+      favouritesCount: voteCount,
+      actions: contentActions(target, articleVoteState(target), voteCount),
       repliesCount: numberOrUndefined(target.comment_count)
     };
   }
@@ -380,6 +735,7 @@
       text(target.excerpt) || text(target.content)
     ).trim();
     const keyId = "article:" + id;
+    const voteCount = numberOrUndefined(target.voteup_count);
     return {
       key: { id: keyId, host: accountHost(context) },
       author: mapAuthor(target.author, context),
@@ -394,17 +750,21 @@
       media: imageMedia(thumbnail, keyId + "-cover") ?? imageMedia(text(target.image_url), keyId + "-cover"),
       detailType: "article",
       url: "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(id),
-      favouritesCount: numberOrUndefined(target.voteup_count),
+      favouritesCount: voteCount,
+      actions: contentActions(target, articleVoteState(target), voteCount),
       repliesCount: numberOrUndefined(target.comment_count)
     };
   }
   function mapPinPreview(target, context) {
-    const id = text(target.id).trim();
+    const urlId = /^https?:\/\/www\.zhihu\.com\/pin\/(\d+)(?:[/?#]|$)/i.exec(text(target.url))?.[1];
+    const id = numericId(target.id_str) ?? numericId(target.id) ?? urlId;
     if (!id) return void 0;
     const excerpt = pinExcerpt(target);
-    const title = text(target.excerpt_title).trim() || (excerpt ? "" : "\u60F3\u6CD5");
-    const url = normalizeLinkUrl(text(target.url)) || "https://www.zhihu.com/pin/" + encodeURIComponent(id);
+    const title = pinTitle(target) || (excerpt ? "" : pinLabel(context));
     const keyId = "pin:" + id;
+    const voteCount = numberOrUndefined(target.like_count ?? target.reaction_count);
+    const virtuals = asObject(target.virtuals);
+    const liked = virtuals?.is_liked ?? virtuals?.isLiked ?? target.is_liked;
     return {
       key: { id: keyId, host: accountHost(context) },
       author: mapAuthor(target.author, context),
@@ -412,37 +772,37 @@
       content: { format: "html", value: titleAndBody(title, excerpt) },
       sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: pinMedia(target, keyId),
-      detailType: "link",
-      url,
-      favouritesCount: numberOrUndefined(
-        target.like_count ?? target.reaction_count
-      ),
+      detailType: "article",
+      url: ZHIHU_ORIGIN + "/pin/" + id,
+      favouritesCount: voteCount,
+      actions: contentActions(target, typeof liked === "boolean" ? liked : void 0, voteCount),
       repliesCount: numberOrUndefined(target.comment_count)
     };
   }
-  function mapQuestionPreview(target, context, hotText, rank) {
-    const id = text(target.id).trim();
+  function mapQuestionPreview(target, context, hotText, rank, full = false) {
+    const id = numericId(target.id);
     const title = text(target.title).trim();
     if (!id || !title) return void 0;
-    const excerpt = stripTags(
-      text(target.detail) || text(target.excerpt)
-    ).trim();
+    const detail = text(target.detail) || text(target.excerpt);
+    const excerpt = stripTags(detail).trim();
     const heading = rank === void 0 ? title : "#" + String(rank) + " " + title;
     const answerCount = numberOrUndefined(target.answer_count);
     const answerUnit = context.locale.toLowerCase().startsWith("zh") ? " \u4E2A\u56DE\u7B54" : answerCount === 1 ? " answer" : " answers";
     const answers = answerCount === void 0 ? "" : String(answerCount) + answerUnit;
     const metadata = [hotText, answers].filter(Boolean).join(" \xB7 ");
     const body = [metadata, excerpt === title ? "" : excerpt].filter(Boolean).join("\n");
+    const content = full ? "<p><b>" + escapeHtml(title) + "</b></p>" + (metadata ? "<p>" + escapeHtml(metadata) + "</p>" : "") + cleanHtml(detail) : titleAndBody(heading, body);
     return {
       key: { id: "question:" + id, host: accountHost(context) },
+      author: full ? mapAuthor(target.author, context) : void 0,
       createdAt: isoFromTimestamp(target.created ?? target.created_time) ?? nowIso(),
       content: {
         format: "html",
-        value: titleAndBody(heading, body)
+        value: content
       },
       sourceLanguages: zhihuSourceLanguages(title, excerpt),
       media: imageMedia(text(target.thumbnail), "question:" + id + "-cover"),
-      detailType: "link",
+      detailType: "post",
       url: "https://www.zhihu.com/question/" + encodeURIComponent(id)
     };
   }
@@ -582,18 +942,55 @@
       coverUrl: coverInBody ? void 0 : coverUrl
     };
   }
+  function mapPinDetail(pin, key, id, context) {
+    const html = text(pin.content_html).trim();
+    const main = html ? cleanHtml(html).trim() : "";
+    const parts = main ? [main] : [];
+    const images = /* @__PURE__ */ new Set();
+    const links = /* @__PURE__ */ new Set();
+    for (const value of asArray(pin.content)) {
+      const item = asObject(value);
+      if (!item) continue;
+      if (!main && item.type === "text") {
+        const body = cleanHtml(text(item.content)).trim();
+        if (body) parts.push(body);
+      }
+      for (const image of pinImages(item)) {
+        if (!images.has(image.url) && !main.includes('src="' + escapeAttribute(image.url) + '"')) {
+          images.add(image.url);
+          parts.push('<img src="' + escapeAttribute(image.url) + '" />');
+        }
+      }
+      if (item.type === "link_card") {
+        const url = normalizeLinkUrl(text(item.url));
+        if (url && !links.has(url) && !main.includes('href="' + escapeAttribute(url) + '"')) {
+          links.add(url);
+          const title = text(item.title).trim() || url;
+          parts.push('<p><a href="' + escapeAttribute(url) + '">' + escapeHtml(title) + "</a></p>");
+        }
+      }
+    }
+    const fallback = pinExcerpt(pin);
+    return {
+      key,
+      title: pinTitle(pin) || pinLabel(context),
+      author: mapAuthor(pin.author, context),
+      createdAt: isoFromTimestamp(pin.created ?? pin.created_time),
+      content: { format: "html", value: parts.join("\n") || escapeHtml(fallback) || " " },
+      url: ZHIHU_ORIGIN + "/pin/" + id
+    };
+  }
   function mapComment(value, ref, context) {
     const comment = asObject(value);
     if (!comment) return void 0;
     const id = text(comment.id).trim();
     if (!id) return void 0;
     const authorObject = asObject(asObject(comment.author)?.member) ?? asObject(comment.author);
-    const replyTo = text(
-      asObject(asObject(comment.reply_to_author)?.member)?.name
-    ).trim();
+    const replyAuthor = asObject(comment.reply_to_author);
+    const replyTo = text((asObject(replyAuthor?.member) ?? replyAuthor)?.name).trim();
     const body = cleanHtml(text(comment.content));
     const prefix = replyTo ? "<p>\u56DE\u590D @" + escapeHtml(replyTo) + "\uFF1A</p>" : "";
-    const url = ref.kind === "answer" ? "https://www.zhihu.com/answer/" + encodeURIComponent(ref.id) : "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(ref.id);
+    const url = ref.kind === "answer" ? "https://www.zhihu.com/answer/" + encodeURIComponent(ref.id) : ref.kind === "pin" ? ZHIHU_ORIGIN + "/pin/" + ref.id : "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(ref.id);
     return {
       key: { id: "comment:" + id, host: accountHost(context) },
       author: mapAuthor(authorObject, context),
@@ -602,7 +999,7 @@
       sourceLanguages: zhihuSourceLanguages(stripTags(body)),
       detailType: "link",
       url,
-      favouritesCount: numberOrUndefined(comment.vote_count)
+      favouritesCount: numberOrUndefined(comment.vote_count ?? comment.like_count)
     };
   }
   function mapMemberProfile(member, keyId, context) {
@@ -695,7 +1092,7 @@
       url: context.origin + path,
       cookies: auth.cookies,
       headers: signedHeaders(path, auth, method === "POST"),
-      body: method === "POST" ? { type: "json", value: body ?? {} } : void 0
+      body: body === void 0 ? void 0 : { type: "json", value: body }
     });
     if (response.status === 401) {
       fail("AuthenticationRequired", "\u77E5\u4E4E\u767B\u5F55\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55");
@@ -708,7 +1105,7 @@
       fail("Remote", "\u77E5\u4E4E\u63A5\u53E3\u8FD4\u56DE\u9519\u8BEF\uFF08" + String(response.status) + "\uFF09");
     }
     if (response.status === 204 || !response.body.trim()) {
-      if (method === "POST") return {};
+      if (method !== "GET") return {};
       fail("InvalidResponse", "\u77E5\u4E4E\u6CA1\u6709\u8FD4\u56DE\u5185\u5BB9");
     }
     const root = parseJsonObject(response.body);
@@ -783,7 +1180,7 @@
     }
   }
   function parseArticleKey(id) {
-    const match = /^(answer|article):(\d+)$/.exec(id);
+    const match = /^(answer|article|pin):(\d+)$/.exec(id);
     if (!match) return void 0;
     return { kind: match[1], id: match[2] };
   }
@@ -849,30 +1246,41 @@
       if (content) parts.push(content);
     }
     const textValue = parts.join(" ").trim();
-    return textValue || stripTags(text(target.excerpt_title)).trim();
+    return textValue || stripTags(text(target.content_html) || text(target.excerpt_title)).trim();
+  }
+  function pinTitle(pin) {
+    const textItem = asArray(pin.content).map(asObject).find((item) => item?.type === "text");
+    return text(textItem?.title).trim();
+  }
+  function pinLabel(context) {
+    return context.locale.toLowerCase().startsWith("zh") ? "\u60F3\u6CD5" : "Pin";
+  }
+  function pinImages(item) {
+    const images = [];
+    const direct = normalizeMediaUrl(
+      text(item.original_url) || text(item.image_url) || (item.type === "image" ? text(item.url) : "")
+    );
+    if (direct) images.push({ url: direct, previewUrl: normalizeMediaUrl(text(item.thumbnail)) });
+    for (const value of asArray(item.image_urls)) {
+      const url = normalizeMediaUrl(text(value));
+      if (url) images.push({ url });
+    }
+    return images;
   }
   function pinMedia(target, keyId) {
-    const urls = [];
+    const media = [];
+    const urls = /* @__PURE__ */ new Set();
     for (const value of asArray(target.content)) {
       const item = asObject(value);
       if (!item) continue;
-      const direct = normalizeMediaUrl(text(item.image_url));
-      if (direct) urls.push(direct);
-      for (const nested of asArray(item.image_urls)) {
-        const url = normalizeMediaUrl(text(nested));
-        if (url) urls.push(url);
+      for (const image of pinImages(item)) {
+        if (urls.has(image.url)) continue;
+        urls.add(image.url);
+        media.push({ id: keyId + "-" + media.length, type: "image", ...image });
+        if (media.length === 9) return media;
       }
     }
-    const unique = [];
-    for (const url of urls) {
-      if (!unique.includes(url)) unique.push(url);
-      if (unique.length >= 9) break;
-    }
-    return unique.length ? unique.map((url, index) => ({
-      id: keyId + "-" + String(index),
-      type: "image",
-      url
-    })) : void 0;
+    return media.length ? media : void 0;
   }
   function imageMedia(value, id) {
     const url = normalizeMediaUrl(value || "");
@@ -979,6 +1387,11 @@
     if (typeof value === "string") return value;
     if (typeof value === "number") return String(value);
     return "";
+  }
+  function numericId(value) {
+    if (typeof value === "number" && !Number.isSafeInteger(value)) return void 0;
+    const id = text(value).trim();
+    return /^\d+$/.test(id) ? id : void 0;
   }
   function numberOrUndefined(value) {
     const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;

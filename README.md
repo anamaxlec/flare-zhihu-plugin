@@ -7,14 +7,18 @@
 | Flare 能力 | 实现 | 知乎接口 |
 | --- | --- | --- |
 | `timeline` | 推荐（默认）、热榜、关注动态 | `/api/v3/feed/topstory/recommend`、`/api/v3/feed/topstory/hot-lists/total`、`/api/v3/moments` |
-| `article.detail` | 回答、文章正文 | `/api/v4/answers/{id}`、`/api/v4/articles/{id}` |
-| `article.comments` | 回答/文章评论，含楼中楼回复标记 | `/api/v4/{answers|articles}/{id}/comments` |
+| `article` | 原生阅读回答、文章和想法，查看评论 | `/api/v4/{answers,articles,pins}/{id}`、评论接口 |
+| `post` | 问题详情和分页回答列表；回答、文章、想法卡片的赞同与取消 | `/api/v4/questions/{id}`、`/feeds`、各内容的 `/voters` |
+| `search` | 搜内容和用户；发现页显示热榜、推荐流作者和热搜词 | `/api/v4/search_v3`、`/api/v4/search/hot_search`、现有信息流 |
+| `tabCatalog` | 在「添加标签页」选择自己的知乎收藏夹并浏览 | `/api/v4/people/{handle}/collections`、`/api/v4/collections/{id}/items` |
+| `notification` | 查看最近的知乎通知，已知内容目标可在 Flare 中打开 | `/api/v4/notifications/v2/recent` |
+| `compose` | 发布公开的纯文字想法；在回答、文章和想法卡片上发表评论 | `/api/v4/content/publish`、`/api/v4/comment_v5/{type}s/{id}/comment` |
 | `profile` | 用户资料、回答/文章/想法、关注与粉丝列表 | `/api/v4/members/{id}` 及子资源 |
 | `relation` | 关注、取消关注 | `POST /api/v4/members/{id}/followers` |
 
 登录使用 `WebCookie`：在 Flare 内置浏览器打开知乎并登录，Host 收集 `z_c0`、`d_c0` 等 Cookie，再调用 `/api/v4/me` 校验身份。
 
-未实现：搜索、通知、发布、点赞/收藏/评论写入。Flare 的 `search` 能力要求五个方法全部实现，而知乎缺少稳定的公开发现接口，首版不声明该能力。
+收藏夹当前支持浏览，发布支持纯文字。知乎原文链接仍可用于查看投票等站点专属内容。
 
 ## 安装
 
@@ -44,7 +48,7 @@ npm run package  # 生成 plugin.fpp
 - 所有请求都走 `https://www.zhihu.com`，不需要额外的 `httpOrigins`。
 - 知乎 Web 接口需要 `x-zse-93` 和 `x-zse-96` 风控签名。插件在 `plugin.ts` 里实现了纯 JavaScript 的 MD5 + SM4-like 加密，签名输入为 `101_3_3.0 + 请求路径（含查询串）+ d_c0`。
 - 请求 Cookie 通过 Host 的结构化 `cookies` 参数传递，不直接设置 `Cookie` 头；`d_c0` 同时保存在 credential 里用于签名。
-- 回答和文章统一映射为 `article` 详情，key 分别是 `answer:<id>` 和 `article:<id>`；热榜问题、想法、视频映射为 `link`，点击后在浏览器打开。
+- 回答、文章和想法使用 Flare 阅读页。问题使用原生详情和回答列表，列表中的回答可以继续打开全文。视频保留原文链接。
 - 正文 HTML 会清理 script/style/iframe、事件属性，并把 `data-original` 图片地址提升为 `src`，转成 HTTPS。
 - 关注动态来自 `/api/v3/moments`，分组和广告会被展开或跳过；动态条目会带上「谁赞同/回答/关注了」的 `presentation.message`。
 - 推荐、热榜和关注动态支持向下翻页。热榜会按榜单顺序展示接口返回的条目。
@@ -52,7 +56,6 @@ npm run package  # 生成 plugin.fpp
 ## 已知限制
 
 - 知乎 Web 接口没有公开文档，属于非官方适配；风控策略或字段变化可能导致请求失败。
-- 热榜条目是问题而不是回答，首版直接作为外链打开，不在插件内抓取问题下的回答。
 - `zse-96` 算法或知乎前端版本变化时需要同步更新签名实现。
 - 无 Cookie、伪造 Cookie 或触发风控时，知乎会返回 401/403；插件会提示重新登录或稍后再试。
 - 未在真实 Flare 客户端里用真实账号跑过全流程；`npm test` 使用的是 mock Host 和固定响应。
