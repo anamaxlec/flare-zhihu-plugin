@@ -11,13 +11,17 @@ let pinLiked = false;
 let answerVote = "neutral";
 let articleVote = 0;
 const pinId = "2050290260991534603";
+const longQuestionId = "2089437755591713926";
 const pinUrl = "https://www.zhihu.com/pin/" + pinId;
 const pinBody = {
   id: pinId,
   type: "pin",
   url: pinUrl + "?native=0",
   author: { id: "u1", url_token: "alice", name: "Alice" },
-  content_html: '<p>想法全文第一段</p><p>想法全文最后一段</p><img src="//pic1.zhimg.com/existing.jpg">',
+  content_html:
+    '<p>想法全文第一段 <img class="emoji" src="//pic1.zhimg.com/emoji.png"></p>' +
+    '<p>想法全文最后一段</p><img src="//pic1.zhimg.com/existing.jpg">' +
+    '<figure><img src="//pic1.zhimg.com/captioned.jpg"><figcaption>图片说明</figcaption></figure>',
   content: [
     { type: "text", title: "想法标题", content: "<p>想法全文第一段</p>" },
     { type: "image", url: "//pic1.zhimg.com/existing.jpg" },
@@ -107,9 +111,9 @@ function route(request) {
       },
     });
   }
-  if (path === "/api/v4/questions/999") {
+  if (path === "/api/v4/questions/999" || path === "/api/v4/questions/" + longQuestionId) {
     return json({
-      id: "999", title: "今天的热门问题", answer_count: 2,
+      id: path.split("/").at(-1), title: "今天的热门问题", answer_count: 2,
       detail: "<p>问题完整描述</p>", created: 1700000300,
     });
   }
@@ -206,7 +210,7 @@ function route(request) {
     return json({ id: "new-comment", created_time: 1700000500, content: request.body.value.content });
   }
   if (path === "/api/v3/feed/topstory/hot-lists/total") {
-    return json({
+    const response = json({
       data: [
         {
           detail_text: "1234 万热度",
@@ -219,11 +223,19 @@ function route(request) {
           },
           children: [{ thumbnail: "https://pic1.zhimg.com/hot.jpg" }],
         },
-        ...Array.from({ length: 49 }, (_, index) => ({
-          target: { id: String(1000 + index), title: "热榜问题 " + String(index + 2) },
+        { target: { id: 1000, title: "另一条旧问题" } },
+        ...Array.from({ length: 48 }, (_, index) => ({
+          target: {
+            id: String(BigInt(longQuestionId) + BigInt(index)),
+            name: index === 0 ? "热榜问题 3" : undefined,
+            title: index === 0 ? undefined : "热榜问题 " + String(index + 3),
+            excerpt: index === 0 ? '"id":' + longQuestionId : undefined,
+          },
         })),
       ],
     });
+    // Keep the exact unquoted integer literals returned by Zhihu instead of rounding them in JS.
+    return { ...response, body: response.body.replace(/"id":"(\d{19})"/g, '"id":$1') };
   }
   if (path === "/api/v3/moments") {
     return json({
@@ -627,6 +639,10 @@ assert.equal(hot.items[0].post.detailType, "post");
 assert.ok(hot.items[0].post.content.value.startsWith("<b>#1 今天的热门问题</b>"));
 assert.ok(hot.items[0].post.content.value.includes("1234 万热度 · 88 个回答"));
 assert.equal(hot.items[0].post.media[0].url, "https://pic1.zhimg.com/hot.jpg");
+assert.equal(hot.items[2].post.key.id, "question:" + longQuestionId);
+assert.ok(hot.items[2].post.content.value.startsWith("<b>#3 热榜问题 3</b>"));
+assert.equal(hot.items[3].post.key.id, "question:" + String(BigInt(longQuestionId) + 1n));
+assert.ok(hot.items[2].post.content.value.includes("&quot;id&quot;:" + longQuestionId));
 const hotOlder = (cursor) => plugin.capabilities.timeline.page(
   {
     timelineId: "hot",
@@ -768,7 +784,10 @@ const pinDetail = await plugin.capabilities.article.detail({ key: pinPreview.key
 assert.equal(pinDetail.title, "想法标题");
 assert.ok(pinDetail.content.value.includes("想法全文最后一段"));
 assert.equal(pinDetail.content.value.split("existing.jpg").length, 2);
-assert.ok(pinDetail.content.value.includes('src="https://pic1.zhimg.com/image.jpg"'));
+assert.ok(pinDetail.content.value.includes('<figure><img src="https://pic1.zhimg.com/existing.jpg" /></figure>'));
+assert.ok(pinDetail.content.value.includes('<figure><img src="https://pic1.zhimg.com/image.jpg" /></figure>'));
+assert.ok(pinDetail.content.value.includes('<figure><img src="https://pic1.zhimg.com/captioned.jpg" /><figcaption>图片说明</figcaption></figure>'));
+assert.ok(pinDetail.content.value.includes('<p>想法全文第一段 <img src="https://pic1.zhimg.com/emoji.png" /></p>'));
 assert.ok(pinDetail.content.value.includes('href="https://www.zhihu.com/question/999"'));
 const pinComments = await plugin.capabilities.article.comments({ key: pinPreview.key, page: refresh }, context);
 assert.equal(pinComments.items[0].post.author.displayName, "Bob");
@@ -783,6 +802,8 @@ assert.ok(morePinComments.items[0].post.content.value.includes("回复 @Alice"))
 const questionKey = hot.items[0].post.key;
 const question = await plugin.capabilities.post.detail({ key: questionKey }, context);
 assert.ok(question.post.content.value.includes("问题完整描述"));
+const longQuestion = await plugin.capabilities.post.detail({ key: hot.items[2].post.key }, context);
+assert.equal(longQuestion.post.url, "https://www.zhihu.com/question/" + longQuestionId);
 const questionPage = await plugin.capabilities.post.context({ key: questionKey, page: refresh }, context);
 assert.equal(questionPage.items[0].post.key.id, questionKey.id);
 assert.equal(questionPage.items[1].post.detailType, "article");

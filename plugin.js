@@ -757,7 +757,7 @@
   }
   function mapPinPreview(target, context) {
     const urlId = /^https?:\/\/www\.zhihu\.com\/pin\/(\d+)(?:[/?#]|$)/i.exec(text(target.url))?.[1];
-    const id = numericId(target.id_str) ?? numericId(target.id) ?? urlId;
+    const id = numericId(target.id_str) ?? urlId ?? numericId(target.id);
     if (!id) return void 0;
     const excerpt = pinExcerpt(target);
     const title = pinTitle(target) || (excerpt ? "" : pinLabel(context));
@@ -780,8 +780,8 @@
     };
   }
   function mapQuestionPreview(target, context, hotText, rank, full = false) {
-    const id = numericId(target.id);
-    const title = text(target.title).trim();
+    const id = numericId(target.id_str) ?? numericId(target.id);
+    const title = text(target.title).trim() || text(target.name).trim();
     if (!id || !title) return void 0;
     const detail = text(target.detail) || text(target.excerpt);
     const excerpt = stripTags(detail).trim();
@@ -850,7 +850,7 @@
       rank
     );
     if (!post) return void 0;
-    post.media = imageMedia(thumbnail, "question:" + text(target.id) + "-cover");
+    post.media = imageMedia(thumbnail, post.key.id + "-cover");
     return post;
   }
   function mapMomentItems(data, context) {
@@ -944,7 +944,7 @@
   }
   function mapPinDetail(pin, key, id, context) {
     const html = text(pin.content_html).trim();
-    const main = html ? cleanHtml(html).trim() : "";
+    const main = html ? cleanHtml(html, true).trim() : "";
     const parts = main ? [main] : [];
     const images = /* @__PURE__ */ new Set();
     const links = /* @__PURE__ */ new Set();
@@ -952,13 +952,13 @@
       const item = asObject(value);
       if (!item) continue;
       if (!main && item.type === "text") {
-        const body = cleanHtml(text(item.content)).trim();
+        const body = cleanHtml(text(item.content), true).trim();
         if (body) parts.push(body);
       }
       for (const image of pinImages(item)) {
         if (!images.has(image.url) && !main.includes('src="' + escapeAttribute(image.url) + '"')) {
           images.add(image.url);
-          parts.push('<img src="' + escapeAttribute(image.url) + '" />');
+          parts.push('<figure><img src="' + escapeAttribute(image.url) + '" /></figure>');
         }
       }
       if (item.type === "link_card") {
@@ -1286,15 +1286,27 @@
     const url = normalizeMediaUrl(value || "");
     return url ? [{ id, type: "image", url }] : void 0;
   }
-  function cleanHtml(value) {
+  function cleanHtml(value, blockImages = false) {
     let html = value.replace(/<script[\s\S]*?<\/script>/gi, "").replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<noscript[\s\S]*?<\/noscript>/gi, "").replace(/<iframe[\s\S]*?<\/iframe>/gi, "");
-    html = html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const imageMarkup = blockImages ? /<\/?figure\b[^>]*>|<img\b[^>]*>/gi : /<img\b[^>]*>/gi;
+    let figureDepth = 0;
+    html = html.replace(imageMarkup, (tag) => {
+      if (/^<figure\b/i.test(tag)) {
+        figureDepth += 1;
+        return tag;
+      }
+      if (/^<\/figure\b/i.test(tag)) {
+        figureDepth = Math.max(0, figureDepth - 1);
+        return tag;
+      }
       const source = attribute(tag, "data-original") || attribute(tag, "data-actualsrc") || attribute(tag, "src");
       const alt = attribute(tag, "alt");
       const url = normalizeMediaUrl(source);
       if (!url) return "";
       const altAttribute = alt ? ' alt="' + escapeAttribute(decodeEntities(alt)) + '"' : "";
-      return '<img src="' + escapeAttribute(url) + '"' + altAttribute + " />";
+      const image = '<img src="' + escapeAttribute(url) + '"' + altAttribute + " />";
+      const inlineIcon = /(?:^|[\s_-])(?:emoji|emoticon)(?:$|[\s_-])/i.test(attribute(tag, "class"));
+      return blockImages && figureDepth === 0 && !inlineIcon ? "<figure>" + image + "</figure>" : image;
     });
     html = html.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "").replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "");
     html = html.replace(/(src|href)=(["'])\/\//gi, "$1=$2https://");
@@ -1371,7 +1383,11 @@
   }
   function parseJsonObject(body) {
     try {
-      const parsed = JSON.parse(body);
+      const json = /"id"\s*:\s*\d{16,}(?=\s*[,}])/.test(body) ? body.replace(
+        /("id"\s*:\s*)(\d{16,})(?=\s*[,}])|"(?:[^"\\]|\\.)*"/g,
+        (token, prefix, digits) => prefix && digits && !Number.isSafeInteger(Number(digits)) ? prefix + '"' + digits + '"' : token
+      ) : body;
+      const parsed = JSON.parse(json);
       return asObject(parsed);
     } catch {
       return void 0;
