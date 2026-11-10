@@ -5,6 +5,8 @@
   "login.browser.title": "在浏览器中登录",
   "timeline.recommend.title": "推荐",
   "timeline.hot.title": "热榜",
+  "timeline.recommendCompact.title": "推荐（紧凑）",
+  "timeline.followingCompact.title": "关注（紧凑）",
   "timeline.following.title": "关注",
   "timeline.collections.title": "收藏夹",
   "profileTab.answers": "回答",

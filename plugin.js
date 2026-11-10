@@ -125,14 +125,16 @@
           if (request.page.direction === "newer") {
             fail("Unsupported", "\u77E5\u4E4E\u65F6\u95F4\u7EBF\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
           }
-          if (request.timelineId === "recommend") {
-            return loadRecommend(request.page, context);
+          if (request.timelineId === "recommend" || request.timelineId === "recommend-compact") {
+            const result = await loadRecommend(request.page, context);
+            return request.timelineId === "recommend-compact" ? compactTimeline(result, context) : result;
           }
           if (request.timelineId === "hot") {
             return loadHot(request.page, context);
           }
-          if (request.timelineId === "following") {
-            return loadFollowing(request.page, context);
+          if (request.timelineId === "following" || request.timelineId === "following-compact") {
+            const result = await loadFollowing(request.page, context);
+            return request.timelineId === "following-compact" ? compactTimeline(result, context) : result;
           }
           const collection = /^collection-(\d+)$/.exec(request.timelineId);
           if (collection) return loadCollection(collection[1], request.page, context);
@@ -633,6 +635,39 @@
       olderCursor,
       endReached: olderCursor === void 0
     };
+  }
+  function compactTimeline(page, context) {
+    const chinese = context.locale.toLowerCase().startsWith("zh");
+    const items = page.items?.map((item) => {
+      if (item.type !== "post") return item;
+      const { post, presentation } = item;
+      const url = post.url;
+      if (!url) return item;
+      const html = post.content.value;
+      const heading = /^<b>([^<]*)<\/b>(?:<br\/>)?/.exec(html);
+      const [firstLine, ...rest] = previewText(heading ? html.slice(heading[0].length) : html).split("\n");
+      const title = heading ? decodeEntities(heading[1]) : firstLine;
+      const excerpt = heading ? [firstLine, ...rest].filter(Boolean).join(" ") : rest.join(" ");
+      const activity = presentation?.message;
+      const activityText = activity ? [activity.actor?.displayName, activity.text].filter(Boolean).join(" ") : "";
+      const count = post.repliesCount;
+      const commentCount = count === void 0 ? "" : count + (chinese ? " \u6761\u8BC4\u8BBA" : count === 1 ? " comment" : " comments");
+      const description = [[activityText, commentCount].filter(Boolean).join(" \xB7 "), excerpt].filter(Boolean).join("\n");
+      return {
+        type: "feed",
+        feed: {
+          url,
+          createdAt: post.createdAt,
+          source: { name: post.author?.displayName || (chinese ? "\u77E5\u4E4E" : "Zhihu"), iconUrl: post.author?.avatarUrl },
+          title: title || (chinese ? "\u77E5\u4E4E\u5185\u5BB9" : "Zhihu post"),
+          description: description ? { format: "plain", value: description } : void 0,
+          media: post.media?.find(({ type }) => type === "image"),
+          sourceLanguages: post.sourceLanguages,
+          target: post.detailType === "link" ? { type: "link", url } : { type: post.detailType === "article" ? "article" : "post", key: post.key }
+        }
+      };
+    });
+    return { ...page, items };
   }
   function recommendPagePath(cursor, limit) {
     const path = cursor.replace(/^(?:https?:)?\/\/www\.zhihu\.com(?=\/)/i, "");

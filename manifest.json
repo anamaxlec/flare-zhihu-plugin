@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.maxlec.zhihu",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "defaultLocale": "zh-Hans",
   "name": { "key": "plugin.name", "fallback": "Zhihu" },
   "description": { "key": "plugin.description", "fallback": "Zhihu hot list, recommendations and answers" },
@@ -118,6 +118,18 @@
       {
         "id": "following",
         "title": { "key": "timeline.following.title", "fallback": "Following" },
+        "icon": "Follow",
+        "display": "List"
+      },
+      {
+        "id": "recommend-compact",
+        "title": { "key": "timeline.recommendCompact.title", "fallback": "Recommended (compact)" },
+        "icon": "Home",
+        "display": "List"
+      },
+      {
+        "id": "following-compact",
+        "title": { "key": "timeline.followingCompact.title", "fallback": "Following (compact)" },
         "icon": "Follow",
         "display": "List"
       }

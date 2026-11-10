@@ -136,14 +136,16 @@ defineFlareSocialPlugin({
         if (request.page.direction === "newer") {
           fail("Unsupported", "知乎时间线不支持更新方向的分页");
         }
-        if (request.timelineId === "recommend") {
-          return loadRecommend(request.page, context);
+        if (request.timelineId === "recommend" || request.timelineId === "recommend-compact") {
+          const result = await loadRecommend(request.page, context);
+          return request.timelineId === "recommend-compact" ? compactTimeline(result, context) : result;
         }
         if (request.timelineId === "hot") {
           return loadHot(request.page, context);
         }
-        if (request.timelineId === "following") {
-          return loadFollowing(request.page, context);
+        if (request.timelineId === "following" || request.timelineId === "following-compact") {
+          const result = await loadFollowing(request.page, context);
+          return request.timelineId === "following-compact" ? compactTimeline(result, context) : result;
         }
         const collection = /^collection-(\d+)$/.exec(request.timelineId);
         if (collection) return loadCollection(collection[1], request.page, context);
@@ -746,6 +748,44 @@ async function loadRecommend(
     olderCursor,
     endReached: olderCursor === undefined,
   };
+}
+
+function compactTimeline(page: PageV1<TimelineItemV1>, context: PluginInvocationContextV1): PageV1<TimelineItemV1> {
+  const chinese = context.locale.toLowerCase().startsWith("zh");
+  const items = page.items?.map((item): TimelineItemV1 => {
+    if (item.type !== "post") return item;
+    const { post, presentation } = item;
+    const url = post.url;
+    if (!url) return item;
+    const html = post.content.value;
+    // The regular preview already escapes and truncates the title and excerpt.
+    const heading = /^<b>([^<]*)<\/b>(?:<br\/>)?/.exec(html);
+    const [firstLine, ...rest] = previewText(heading ? html.slice(heading[0].length) : html).split("\n");
+    const title = heading ? decodeEntities(heading[1]) : firstLine;
+    const excerpt = heading ? [firstLine, ...rest].filter(Boolean).join(" ") : rest.join(" ");
+    const activity = presentation?.message;
+    const activityText = activity ? [activity.actor?.displayName, activity.text].filter(Boolean).join(" ") : "";
+    const count = post.repliesCount;
+    const commentCount = count === undefined ? "" : count +
+      (chinese ? " 条评论" : (count === 1 ? " comment" : " comments"));
+    const description = [[activityText, commentCount].filter(Boolean).join(" · "), excerpt].filter(Boolean).join("\n");
+    return {
+      type: "feed",
+      feed: {
+        url,
+        createdAt: post.createdAt,
+        source: { name: post.author?.displayName || (chinese ? "知乎" : "Zhihu"), iconUrl: post.author?.avatarUrl },
+        title: title || (chinese ? "知乎内容" : "Zhihu post"),
+        description: description ? { format: "plain", value: description } : undefined,
+        media: post.media?.find(({ type }) => type === "image"),
+        sourceLanguages: post.sourceLanguages,
+        target: post.detailType === "link"
+          ? { type: "link", url }
+          : { type: post.detailType === "article" ? "article" : "post", key: post.key },
+      },
+    };
+  });
+  return { ...page, items };
 }
 
 function recommendPagePath(cursor: string, limit: number): string | undefined {

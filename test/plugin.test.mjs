@@ -697,6 +697,33 @@ assert.ok(followingTimeline.items[0].post.content.value.endsWith("…"));
 assert.equal(followingTimeline.items[0].post.media[0].url, "https://pic1.zhimg.com/original.jpg");
 assert.equal(followingTimeline.items[1].presentation, undefined);
 
+const compact = await plugin.capabilities.timeline.page({
+  timelineId: "recommend-compact", page: { direction: "refresh", limit: 20, parameters: {} }, parameters: {},
+}, context);
+const recommendedFeed = compact.items[0].feed;
+assert.equal(compact.items[0].type, "feed");
+assert.equal(recommendedFeed.source.name, "Alice");
+assert.equal(recommendedFeed.source.iconUrl, "https://pic1.zhimg.com/a.jpg");
+assert.equal(recommendedFeed.title, "如何评价 Flutter？");
+assert.match(recommendedFeed.description.value, /7 条评论/);
+assert.equal(recommendedFeed.target.type, "article");
+assert.equal(recommendedFeed.target.key.id, "answer:123");
+assert.equal(compact.olderCursor, recommend.olderCursor);
+const compactOlder = await plugin.capabilities.timeline.page({
+  timelineId: "recommend-compact", page: { direction: "older", cursor: compact.olderCursor, limit: 20, parameters: {} },
+  parameters: {},
+}, context);
+assert.equal(compactOlder.items[0].feed.target.key.id, "article:789");
+assert.equal(compactOlder.endReached, true);
+
+const compactFollowing = await plugin.capabilities.timeline.page({
+  timelineId: "following-compact", page: { direction: "refresh", limit: 20, parameters: {} }, parameters: {},
+}, context);
+const followedFeed = compactFollowing.items[0].feed;
+assert.equal(followedFeed.source.name, "Erin");
+assert.match(followedFeed.description.value, /^Dave 赞同了 · 1 条评论/);
+assert.equal(compactFollowing.items[1].feed.target.key.id, "pin:" + pinId);
+
 const signedRequest = requests.find((request) =>
   request.url.includes("/api/v3/feed/topstory/recommend"),
 );

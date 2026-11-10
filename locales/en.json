@@ -5,6 +5,8 @@
   "login.browser.title": "Sign in with browser",
   "timeline.recommend.title": "Recommended",
   "timeline.hot.title": "Hot list",
+  "timeline.recommendCompact.title": "Recommended (compact)",
+  "timeline.followingCompact.title": "Following (compact)",
   "timeline.following.title": "Following",
   "timeline.collections.title": "Collections",
   "profileTab.answers": "Answers",
