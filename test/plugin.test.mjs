@@ -10,6 +10,7 @@ let following = false;
 let pinLiked = false;
 let answerVote = "neutral";
 let articleVote = 0;
+let answerCommentsUnavailable = false;
 const pinId = "2050290260991534603";
 const longQuestionId = "2089437755591713926";
 const pinUrl = "https://www.zhihu.com/pin/" + pinId;
@@ -111,13 +112,13 @@ function route(request) {
       },
     });
   }
-  if (path === "/api/v4/questions/999" || path === "/api/v4/questions/" + longQuestionId) {
+  if (path === "/api/v4/questions/999" || path === "/api/v4/questions/456" || path === "/api/v4/questions/" + longQuestionId) {
     return json({
       id: path.split("/").at(-1), title: "今天的热门问题", answer_count: 2,
       detail: "<p>问题完整描述</p>", created: 1700000300,
     });
   }
-  if (path === "/api/v4/questions/999/feeds") {
+  if (path === "/api/v4/questions/999/feeds" || path === "/api/v4/questions/456/feeds") {
     const second = search.includes("offset=");
     if (second) assert.equal(url.searchParams.get("offset"), "next+offset");
     else assert.equal(url.searchParams.get("limit"), "19");
@@ -375,6 +376,7 @@ function route(request) {
     });
   }
   if (path === "/api/v4/answers/123/comments") {
+    if (answerCommentsUnavailable) return { ...json({ error: {} }), status: 403 };
     return json({
       data: [
         {
@@ -711,6 +713,7 @@ const detail = await plugin.capabilities.article.detail(
   context,
 );
 assert.equal(detail.title, "如何评价 Flutter？");
+assert.ok(detail.content.value.startsWith('<p><a href="https://www.zhihu.com/question/456">'));
 assert.ok(detail.content.value.includes('<img src="https://pic1.zhimg.com/real.jpg"'));
 assert.ok(!detail.content.value.includes("<script"));
 assert.equal(detail.coverUrl, undefined);
@@ -732,10 +735,15 @@ const comments = await plugin.capabilities.article.comments(
   },
   context,
 );
-assert.equal(comments.items.length, 1);
-assert.equal(comments.items[0].post.author.displayName, "Bob");
-assert.deepEqual(Array.from(comments.items[0].post.sourceLanguages ?? []), ["zh-Hans"]);
-assert.ok(comments.items[0].post.content.value.includes("回复 @Alice"));
+assert.equal(comments.items.length, 2);
+const [questionEntry, answerComment] = comments.items;
+assert.equal(questionEntry.type, "feed");
+assert.equal(questionEntry.feed.title, "在 Flare 查看全部回答");
+assert.equal(questionEntry.feed.target.type, "post");
+assert.equal(questionEntry.feed.target.key.id, "question:456");
+assert.equal(answerComment.post.author.displayName, "Bob");
+assert.deepEqual(Array.from(answerComment.post.sourceLanguages ?? []), ["zh-Hans"]);
+assert.ok(answerComment.post.content.value.includes("回复 @Alice"));
 assert.equal(comments.endReached, true);
 
 const profile = await plugin.capabilities.profile.byId(
@@ -789,6 +797,32 @@ assert.equal(mutation.relation.following, true);
 
 const refresh = { direction: "refresh", limit: 20, parameters: {} };
 const older = (cursor) => ({ ...refresh, direction: "older", cursor });
+
+const answerQuestionKey = questionEntry.feed.target.key;
+const linkedQuestion = await plugin.capabilities.post.context({ key: answerQuestionKey, page: refresh }, context);
+assert.equal(linkedQuestion.items[0].post.key.id, "question:456");
+assert.equal(linkedQuestion.items[1].post.detailType, "article");
+const otherAnswers = await plugin.capabilities.post.context({
+  key: answerQuestionKey, page: older(linkedQuestion.olderCursor),
+}, context);
+assert.equal(otherAnswers.items[0].post.key.id, "answer:124");
+const deepLinkQuestion = await plugin.capabilities.post.detail({ key: { ...answerQuestionKey, id: "456" } }, context);
+assert.equal(deepLinkQuestion.post.key.id, "456");
+assert.equal(deepLinkQuestion.post.url, "https://www.zhihu.com/question/456");
+
+const answerKey = { id: "answer:123", host: "www.zhihu.com" };
+const singleSlot = await plugin.capabilities.article.comments({ key: answerKey, page: { ...refresh, limit: 1 } }, context);
+assert.equal(singleSlot.items.length, 1);
+assert.equal(singleSlot.items[0].type, "feed");
+assert.equal(singleSlot.olderCursor, "0");
+const commentPage = await plugin.capabilities.article.comments({ key: answerKey, page: older(singleSlot.olderCursor) }, context);
+assert.equal(commentPage.items.length, 1);
+assert.equal(commentPage.items[0].post.author.displayName, "Bob");
+answerCommentsUnavailable = true;
+const questionWithoutComments = await plugin.capabilities.article.comments({ key: answerKey, page: refresh }, context);
+assert.equal(questionWithoutComments.items[0].feed.target.key.id, "question:456");
+answerCommentsUnavailable = false;
+
 const pinTimeline = await plugin.capabilities.profile.timeline({
   profile: { id: "abc", host: "www.zhihu.com" }, tabId: "pins", page: refresh, parameters: {},
 }, context);

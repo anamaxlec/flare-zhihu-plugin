@@ -201,10 +201,10 @@ defineFlareSocialPlugin({
       async detail(request, context) {
         const ref = parseArticleKey(request.key.id);
         if (ref) return { post: await loadContentPost(ref, context) };
-        return { post: await loadQuestionPost(questionIdFromKey(request.key.id), context) };
+        return { post: await loadQuestionPost(request.key.id, context) };
       },
       async context(request, context) {
-        return loadQuestionAnswers(questionIdFromKey(request.key.id), request.page, context);
+        return loadQuestionAnswers(request.key.id, request.page, context);
       },
       async mutate(request, context) {
         const ref = parseArticleKey(request.key.id);
@@ -229,35 +229,7 @@ defineFlareSocialPlugin({
           fail("Unsupported", "知乎评论不支持更新方向的分页");
         }
         if (ref.kind === "pin") return loadPinComments(ref, request.page, context);
-        const offset = parseOffset(request.page);
-        const limit = clampLimit(request.page.limit);
-        const plural = ref.kind === "answer" ? "answers" : "articles";
-        const path =
-          "/api/v4/" +
-          plural +
-          "/" +
-          encodeURIComponent(ref.id) +
-          "/comments?limit=" +
-          String(limit) +
-          "&offset=" +
-          String(offset);
-        const root = await apiGet(path, context);
-        const data = asArray(root.data);
-        const items: TimelineItemV1[] = [];
-        for (const value of data) {
-          const item = mapComment(value, ref, context);
-          if (item) items.push({ type: "post", post: item });
-        }
-        const paging = asObject(root.paging);
-        const endReached = boolOr(paging?.is_end, items.length < limit);
-        const next =
-          nextOffsetFromUrl(paging?.next) ??
-          (endReached ? undefined : offset + Math.max(items.length, limit));
-        return {
-          items,
-          olderCursor: endReached || next === undefined ? undefined : String(next),
-          endReached,
-        };
+        return loadArticleComments(ref, request.page, context);
       },
     },
     profile: {
@@ -460,16 +432,79 @@ function articleVoteState(target: JsonObject): boolean | undefined {
   return undefined;
 }
 
+async function loadArticleComments(
+  ref: ArticleRef,
+  page: PageRequestV1,
+  context: PluginInvocationContextV1,
+): Promise<PageV1<TimelineItemV1>> {
+  const offset = parseOffset(page);
+  const limit = clampLimit(page.limit);
+  const isAnswerStart = ref.kind === "answer" && page.direction === "refresh";
+  const commentLimit = isAnswerStart ? Math.max(1, limit - 1) : limit;
+  const plural = ref.kind === "answer" ? "answers" : "articles";
+  const [commentsResponse, answerResponse] = await Promise.allSettled([
+    apiGet("/api/v4/" + plural + "/" + encodeURIComponent(ref.id) +
+      "/comments?limit=" + commentLimit + "&offset=" + offset, context),
+    isAnswerStart
+      ? apiGet("/api/v4/answers/" + encodeURIComponent(ref.id) + "?include=question.id,question.title,created_time",
+        context, true)
+      : undefined,
+  ]);
+  const answer = answerResponse.status === "fulfilled" ? answerResponse.value : undefined;
+  const question = answer ? answerQuestionLink(answer, context) : undefined;
+  if (commentsResponse.status === "rejected") {
+    if (question) return { items: [question], endReached: false, olderCursor: "0" };
+    throw commentsResponse.reason;
+  }
+  const root = commentsResponse.value;
+  const comments: TimelineItemV1[] = asArray(root.data).flatMap((value) => {
+    const post = mapComment(value, ref, context);
+    return post ? [{ type: "post" as const, post }] : [];
+  });
+  const result = pageFromOffset(root, offset, commentLimit, comments);
+  if (question && limit === 1) {
+    const hasComments = comments.length > 0 || !result.endReached;
+    return { items: [question], endReached: !hasComments, olderCursor: hasComments ? "0" : undefined };
+  }
+  if (question) comments.unshift(question);
+  return result;
+}
+
+function answerQuestionId(answer: JsonObject): string | undefined {
+  const question = asObject(answer.question);
+  return numericId(question?.id_str) ?? numericId(question?.id) ?? numericId(answer.question_id);
+}
+
+function answerQuestionLink(answer: JsonObject, context: PluginInvocationContextV1): TimelineItemV1 | undefined {
+  const id = answerQuestionId(answer);
+  if (!id) return undefined;
+  const chinese = context.locale.toLowerCase().startsWith("zh");
+  const title = text(asObject(answer.question)?.title).trim();
+  return {
+    type: "feed",
+    feed: {
+      url: ZHIHU_ORIGIN + "/question/" + id,
+      createdAt: isoFromTimestamp(answer.created_time) ?? nowIso(),
+      source: { name: chinese ? "知乎问题" : "Zhihu Question" },
+      title: chinese ? "在 Flare 查看全部回答" : "See all answers in Flare",
+      description: title ? { format: "plain", value: title } : undefined,
+      target: { type: "post", key: { id: "question:" + id, host: accountHost(context) } },
+      sourceLanguages: chinese ? ["zh-Hans"] : undefined,
+    },
+  };
+}
+
 function questionIdFromKey(key: string): string {
-  const id = /^question:(\d+)$/.exec(key)?.[1];
+  const id = /^(?:question:)?(\d+)$/.exec(key)?.[1];
   if (!id) fail("NotFound", "无法识别这个知乎问题");
   return id;
 }
 
 async function loadQuestionPost(
-  id: string,
+  keyId: string,
   context: PluginInvocationContextV1,
 ): Promise<PostV1> {
+  const id = questionIdFromKey(keyId);
   const question = await apiGet(
     "/api/v4/questions/" + id + "?include=" + QUESTION_DETAIL_INCLUDE,
     context,
@@ -478,26 +513,27 @@ async function loadQuestionPost(
   if (!question) fail("NotFound", "这个知乎问题不存在或已被删除");
   const post = mapQuestionPreview({ ...question, id }, context, undefined, undefined, true);
   if (!post) fail("InvalidResponse", "知乎问题资料不完整");
-  return post;
+  return { ...post, key: { ...post.key, id: keyId } };
 }
 
 async function loadQuestionAnswers(
-  id: string,
+  keyId: string,
   page: PageRequestV1,
   context: PluginInvocationContextV1,
 ): Promise<PageV1<TimelineItemV1>> {
   if (page.direction === "newer") fail("Unsupported", "知乎问题不支持更新方向的分页");
+  const id = questionIdFromKey(keyId);
   const limit = clampLimit(page.limit);
   const refresh = page.direction === "refresh";
   const answerLimit = refresh ? limit - 1 : limit;
   if (answerLimit === 0) {
-    const post = await loadQuestionPost(id, context);
+    const post = await loadQuestionPost(keyId, context);
     return { items: [{ type: "post", post }], olderCursor: "0", endReached: false };
   }
   const endpoint = "/api/v4/questions/" + id + "/feeds";
   const path = pagedPath(endpoint, "?limit=" + answerLimit + "&order=default", page);
   const [root, response] = await Promise.all([
-    refresh ? loadQuestionPost(id, context) : undefined,
+    refresh ? loadQuestionPost(keyId, context) : undefined,
     apiGet(path, context),
   ]);
   const items: TimelineItemV1[] = root ? [{ type: "post", post: root }] : [];
@@ -1168,7 +1204,12 @@ function mapArticleDetail(
   const coverUrl = normalizeMediaUrl(text(root.image_url));
   const coverInBody = coverUrl !== undefined &&
     content.includes('<img src="' + escapeAttribute(coverUrl) + '"');
-  const questionId = text(asObject(root.question)?.id).trim();
+  const questionId = ref.kind === "answer" ? answerQuestionId(root) : undefined;
+  const questionLink = questionId
+    ? '<p><a href="' + ZHIHU_ORIGIN + '/question/' + questionId + '">' +
+      (context.locale.toLowerCase().startsWith("zh") ? "在知乎查看全部回答" : "See all answers on Zhihu") +
+      "</a></p>"
+    : "";
   const url =
     ref.kind === "answer"
       ? questionId
@@ -1187,7 +1228,7 @@ function mapArticleDetail(
     title,
     author: mapAuthor(root.author, context),
     createdAt,
-    content: { format: "html", value: content },
+    content: { format: "html", value: questionLink + content },
     url,
     coverUrl: coverInBody ? undefined : coverUrl,
   };

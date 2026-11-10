@@ -48,7 +48,7 @@ npm run package  # 生成 plugin.fpp
 - 所有请求都走 `https://www.zhihu.com`，不需要额外的 `httpOrigins`。
 - 知乎 Web 接口需要 `x-zse-93` 和 `x-zse-96` 风控签名。插件在 `plugin.ts` 里实现了纯 JavaScript 的 MD5 + SM4-like 加密，签名输入为 `101_3_3.0 + 请求路径（含查询串）+ d_c0`。
 - 请求 Cookie 通过 Host 的结构化 `cookies` 参数传递，不直接设置 `Cookie` 头；`d_c0` 同时保存在 credential 里用于签名。
-- 回答、文章和想法使用 Flare 阅读页。问题使用原生详情和回答列表，列表中的回答可以继续打开全文。视频保留原文链接。
+- 回答、文章和想法使用 Flare 阅读页。问题使用原生详情和回答列表，列表中的回答可以继续打开全文。回答顶部可在知乎网页打开原问题，正文下方评论区的「在 Flare 查看全部回答」可打开原生问题页并翻看其他回答。视频保留原文链接。
 - 正文 HTML 会清理 script/style/iframe、事件属性，并把 `data-original` 图片地址提升为 `src`，转成 HTTPS。
 - 关注动态来自 `/api/v3/moments`，分组和广告会被展开或跳过；动态条目会带上「谁赞同/回答/关注了」的 `presentation.message`。
 - 推荐、热榜和关注动态支持向下翻页。热榜会按榜单顺序展示接口返回的条目。

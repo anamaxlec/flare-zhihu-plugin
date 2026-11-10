@@ -189,10 +189,10 @@
         async detail(request, context) {
           const ref = parseArticleKey(request.key.id);
           if (ref) return { post: await loadContentPost(ref, context) };
-          return { post: await loadQuestionPost(questionIdFromKey(request.key.id), context) };
+          return { post: await loadQuestionPost(request.key.id, context) };
         },
         async context(request, context) {
-          return loadQuestionAnswers(questionIdFromKey(request.key.id), request.page, context);
+          return loadQuestionAnswers(request.key.id, request.page, context);
         },
         async mutate(request, context) {
           const ref = parseArticleKey(request.key.id);
@@ -217,25 +217,7 @@
             fail("Unsupported", "\u77E5\u4E4E\u8BC4\u8BBA\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
           }
           if (ref.kind === "pin") return loadPinComments(ref, request.page, context);
-          const offset = parseOffset(request.page);
-          const limit = clampLimit(request.page.limit);
-          const plural = ref.kind === "answer" ? "answers" : "articles";
-          const path = "/api/v4/" + plural + "/" + encodeURIComponent(ref.id) + "/comments?limit=" + String(limit) + "&offset=" + String(offset);
-          const root = await apiGet(path, context);
-          const data = asArray(root.data);
-          const items = [];
-          for (const value of data) {
-            const item = mapComment(value, ref, context);
-            if (item) items.push({ type: "post", post: item });
-          }
-          const paging = asObject(root.paging);
-          const endReached = boolOr(paging?.is_end, items.length < limit);
-          const next = nextOffsetFromUrl(paging?.next) ?? (endReached ? void 0 : offset + Math.max(items.length, limit));
-          return {
-            items,
-            olderCursor: endReached || next === void 0 ? void 0 : String(next),
-            endReached
-          };
+          return loadArticleComments(ref, request.page, context);
         }
       },
       profile: {
@@ -398,12 +380,68 @@
     if (value === "neutral" || value === "down" || value === 0 || value === -1) return false;
     return void 0;
   }
+  async function loadArticleComments(ref, page, context) {
+    const offset = parseOffset(page);
+    const limit = clampLimit(page.limit);
+    const isAnswerStart = ref.kind === "answer" && page.direction === "refresh";
+    const commentLimit = isAnswerStart ? Math.max(1, limit - 1) : limit;
+    const plural = ref.kind === "answer" ? "answers" : "articles";
+    const [commentsResponse, answerResponse] = await Promise.allSettled([
+      apiGet("/api/v4/" + plural + "/" + encodeURIComponent(ref.id) + "/comments?limit=" + commentLimit + "&offset=" + offset, context),
+      isAnswerStart ? apiGet(
+        "/api/v4/answers/" + encodeURIComponent(ref.id) + "?include=question.id,question.title,created_time",
+        context,
+        true
+      ) : void 0
+    ]);
+    const answer = answerResponse.status === "fulfilled" ? answerResponse.value : void 0;
+    const question = answer ? answerQuestionLink(answer, context) : void 0;
+    if (commentsResponse.status === "rejected") {
+      if (question) return { items: [question], endReached: false, olderCursor: "0" };
+      throw commentsResponse.reason;
+    }
+    const root = commentsResponse.value;
+    const comments = asArray(root.data).flatMap((value) => {
+      const post = mapComment(value, ref, context);
+      return post ? [{ type: "post", post }] : [];
+    });
+    const result = pageFromOffset(root, offset, commentLimit, comments);
+    if (question && limit === 1) {
+      const hasComments = comments.length > 0 || !result.endReached;
+      return { items: [question], endReached: !hasComments, olderCursor: hasComments ? "0" : void 0 };
+    }
+    if (question) comments.unshift(question);
+    return result;
+  }
+  function answerQuestionId(answer) {
+    const question = asObject(answer.question);
+    return numericId(question?.id_str) ?? numericId(question?.id) ?? numericId(answer.question_id);
+  }
+  function answerQuestionLink(answer, context) {
+    const id = answerQuestionId(answer);
+    if (!id) return void 0;
+    const chinese = context.locale.toLowerCase().startsWith("zh");
+    const title = text(asObject(answer.question)?.title).trim();
+    return {
+      type: "feed",
+      feed: {
+        url: ZHIHU_ORIGIN + "/question/" + id,
+        createdAt: isoFromTimestamp(answer.created_time) ?? nowIso(),
+        source: { name: chinese ? "\u77E5\u4E4E\u95EE\u9898" : "Zhihu Question" },
+        title: chinese ? "\u5728 Flare \u67E5\u770B\u5168\u90E8\u56DE\u7B54" : "See all answers in Flare",
+        description: title ? { format: "plain", value: title } : void 0,
+        target: { type: "post", key: { id: "question:" + id, host: accountHost(context) } },
+        sourceLanguages: chinese ? ["zh-Hans"] : void 0
+      }
+    };
+  }
   function questionIdFromKey(key) {
-    const id = /^question:(\d+)$/.exec(key)?.[1];
+    const id = /^(?:question:)?(\d+)$/.exec(key)?.[1];
     if (!id) fail("NotFound", "\u65E0\u6CD5\u8BC6\u522B\u8FD9\u4E2A\u77E5\u4E4E\u95EE\u9898");
     return id;
   }
-  async function loadQuestionPost(id, context) {
+  async function loadQuestionPost(keyId, context) {
+    const id = questionIdFromKey(keyId);
     const question = await apiGet(
       "/api/v4/questions/" + id + "?include=" + QUESTION_DETAIL_INCLUDE,
       context,
@@ -412,21 +450,22 @@
     if (!question) fail("NotFound", "\u8FD9\u4E2A\u77E5\u4E4E\u95EE\u9898\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664");
     const post = mapQuestionPreview({ ...question, id }, context, void 0, void 0, true);
     if (!post) fail("InvalidResponse", "\u77E5\u4E4E\u95EE\u9898\u8D44\u6599\u4E0D\u5B8C\u6574");
-    return post;
+    return { ...post, key: { ...post.key, id: keyId } };
   }
-  async function loadQuestionAnswers(id, page, context) {
+  async function loadQuestionAnswers(keyId, page, context) {
     if (page.direction === "newer") fail("Unsupported", "\u77E5\u4E4E\u95EE\u9898\u4E0D\u652F\u6301\u66F4\u65B0\u65B9\u5411\u7684\u5206\u9875");
+    const id = questionIdFromKey(keyId);
     const limit = clampLimit(page.limit);
     const refresh = page.direction === "refresh";
     const answerLimit = refresh ? limit - 1 : limit;
     if (answerLimit === 0) {
-      const post = await loadQuestionPost(id, context);
+      const post = await loadQuestionPost(keyId, context);
       return { items: [{ type: "post", post }], olderCursor: "0", endReached: false };
     }
     const endpoint = "/api/v4/questions/" + id + "/feeds";
     const path = pagedPath(endpoint, "?limit=" + answerLimit + "&order=default", page);
     const [root, response] = await Promise.all([
-      refresh ? loadQuestionPost(id, context) : void 0,
+      refresh ? loadQuestionPost(keyId, context) : void 0,
       apiGet(path, context)
     ]);
     const items = root ? [{ type: "post", post: root }] : [];
@@ -923,7 +962,8 @@
     const content = cleanHtml(text(root.content) || text(root.excerpt), true);
     const coverUrl = normalizeMediaUrl(text(root.image_url));
     const coverInBody = coverUrl !== void 0 && content.includes('<img src="' + escapeAttribute(coverUrl) + '"');
-    const questionId = text(asObject(root.question)?.id).trim();
+    const questionId = ref.kind === "answer" ? answerQuestionId(root) : void 0;
+    const questionLink = questionId ? '<p><a href="' + ZHIHU_ORIGIN + "/question/" + questionId + '">' + (context.locale.toLowerCase().startsWith("zh") ? "\u5728\u77E5\u4E4E\u67E5\u770B\u5168\u90E8\u56DE\u7B54" : "See all answers on Zhihu") + "</a></p>" : "";
     const url = ref.kind === "answer" ? questionId ? "https://www.zhihu.com/question/" + encodeURIComponent(questionId) + "/answer/" + encodeURIComponent(ref.id) : "https://www.zhihu.com/answer/" + encodeURIComponent(ref.id) : "https://zhuanlan.zhihu.com/p/" + encodeURIComponent(ref.id);
     const createdAt = isoFromTimestamp(
       root.created_time ?? root.updated_time ?? root.created ?? root.updated
@@ -933,7 +973,7 @@
       title,
       author: mapAuthor(root.author, context),
       createdAt,
-      content: { format: "html", value: content },
+      content: { format: "html", value: questionLink + content },
       url,
       coverUrl: coverInBody ? void 0 : coverUrl
     };

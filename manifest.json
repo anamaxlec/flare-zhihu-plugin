@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "dev.maxlec.zhihu",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "defaultLocale": "zh-Hans",
   "name": { "key": "plugin.name", "fallback": "Zhihu" },
   "description": { "key": "plugin.description", "fallback": "Zhihu hot list, recommendations and answers" },
@@ -130,6 +130,14 @@
           { "type": "capture", "name": "handle" }
         ],
         "target": { "type": "Profile", "value": "{handle}" }
+      },
+      {
+        "origin": "$accountOrigin",
+        "path": [
+          { "type": "literal", "value": "question" },
+          { "type": "capture", "name": "id" }
+        ],
+        "target": { "type": "Post", "value": "{id}" }
       }
     ],
     "profileTabs": [
