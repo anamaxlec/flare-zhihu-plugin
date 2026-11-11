@@ -704,6 +704,7 @@ const recommendedFeed = compact.items[0].feed;
 assert.equal(compact.items[0].type, "feed");
 assert.equal(recommendedFeed.source.name, "Alice");
 assert.equal(recommendedFeed.source.iconUrl, "https://pic1.zhimg.com/a.jpg");
+assert.equal(recommendedFeed.source.iconIsAvatar, true);
 assert.equal(recommendedFeed.title, "如何评价 Flutter？");
 assert.match(recommendedFeed.description.value, /7 条评论/);
 assert.equal(recommendedFeed.target.type, "article");

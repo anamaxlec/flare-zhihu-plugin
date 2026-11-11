@@ -769,12 +769,17 @@ function compactTimeline(page: PageV1<TimelineItemV1>, context: PluginInvocation
     const commentCount = count === undefined ? "" : count +
       (chinese ? " 条评论" : (count === 1 ? " comment" : " comments"));
     const description = [[activityText, commentCount].filter(Boolean).join(" · "), excerpt].filter(Boolean).join("\n");
+    const source = {
+      name: post.author?.displayName || (chinese ? "知乎" : "Zhihu"),
+      iconUrl: post.author?.avatarUrl,
+      iconIsAvatar: Boolean(post.author?.avatarUrl),
+    };
     return {
       type: "feed",
       feed: {
         url,
         createdAt: post.createdAt,
-        source: { name: post.author?.displayName || (chinese ? "知乎" : "Zhihu"), iconUrl: post.author?.avatarUrl },
+        source,
         title: title || (chinese ? "知乎内容" : "Zhihu post"),
         description: description ? { format: "plain", value: description } : undefined,
         media: post.media?.find(({ type }) => type === "image"),

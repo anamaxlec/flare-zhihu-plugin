@@ -653,12 +653,17 @@
       const count = post.repliesCount;
       const commentCount = count === void 0 ? "" : count + (chinese ? " \u6761\u8BC4\u8BBA" : count === 1 ? " comment" : " comments");
       const description = [[activityText, commentCount].filter(Boolean).join(" \xB7 "), excerpt].filter(Boolean).join("\n");
+      const source = {
+        name: post.author?.displayName || (chinese ? "\u77E5\u4E4E" : "Zhihu"),
+        iconUrl: post.author?.avatarUrl,
+        iconIsAvatar: Boolean(post.author?.avatarUrl)
+      };
       return {
         type: "feed",
         feed: {
           url,
           createdAt: post.createdAt,
-          source: { name: post.author?.displayName || (chinese ? "\u77E5\u4E4E" : "Zhihu"), iconUrl: post.author?.avatarUrl },
+          source,
           title: title || (chinese ? "\u77E5\u4E4E\u5185\u5BB9" : "Zhihu post"),
           description: description ? { format: "plain", value: description } : void 0,
           media: post.media?.find(({ type }) => type === "image"),
